@@ -54,12 +54,20 @@ repository writes by the validator. Analysis only reads manifests and source.
   ordered collections and stable sorting.
 - Multiple references between the same source and target module become one
   edge with the earliest sorted source evidence.
-- JSON has `schema_version = 1`; all fields are emitted in a fixed structure.
+- JSON has `schema_version = 1`; all top-level report fields are emitted in a
+  fixed structure.
+
+Every JSON result is a `ValidationReport` with one of three outcomes: `passed`,
+`violations`, or `analysis-failure`. Configuration and discovery failures use
+the same report shape with empty module, dependency, finding, exemption, and
+limitation collections and one entry in `analysis_errors`.
 
 ## Explicit limitations
 
-These limitations can create false positives or false negatives and are listed
-in every JSON report and the release notes:
+These limitations can create false positives or false negatives. Reports that
+reach evaluation include this list in JSON output; text output does not render
+it. Configuration, discovery, and other failures returned before evaluation
+use the full JSON report shape with an empty `limitations` list.
 
 - `cfg` predicates and Cargo feature selection are not evaluated. Every repeated
   inline body for one module is analyzed, while repeated file declarations that

@@ -5,33 +5,34 @@ preset = "hexagonal"
 strict = true
 detect_cycles = true
 
-# Adapt these patterns to the project's declared boundaries. A role matches
-# when either one of its module regexes or one of its path regexes matches.
+# Adapt these workspace-root-relative patterns to the project's declared
+# boundaries. A role matches when either one of its module regexes or one of
+# its path regexes matches.
 [[roles]]
 id = "core"
 description = "Domain behavior and policy"
-paths = ["^src/core(?:/|\\.rs$)", "^src/domain(?:/|\\.rs$)"]
+paths = ["^(?:crates/[^/]+/)?src/core(?:/|\\.rs$)", "^(?:crates/[^/]+/)?src/domain(?:/|\\.rs$)"]
 
 [[roles]]
 id = "application"
 description = "Application use cases and orchestration"
-paths = ["^src/application(?:/|\\.rs$)"]
+paths = ["^(?:crates/[^/]+/)?src/application(?:/|\\.rs$)"]
 
 [[roles]]
 id = "port"
 description = "Purposeful application conversations"
-paths = ["^src/ports(?:/|\\.rs$)"]
+paths = ["^(?:crates/[^/]+/)?src/ports(?:/|\\.rs$)"]
 
 [[roles]]
 id = "adapter"
 description = "Technology-specific incoming and outgoing adapters"
-paths = ["^src/adapters?(?:/|\\.rs$)"]
+paths = ["^(?:crates/[^/]+/)?src/adapters?(?:/|\\.rs$)"]
 
 [[roles]]
 id = "composition-root"
 description = "Narrow application wiring and startup boundary"
 modules = ["::composition_root(?:$|::)"]
-paths = ["^src/main\\.rs$", "^src/bin/[^/]+\\.rs$"]
+paths = ["^(?:crates/[^/]+/)?src/main\\.rs$", "^(?:crates/[^/]+/)?src/bin/[^/]+\\.rs$"]
 
 # Allowed rules are explicit, narrow exceptions to named forbidden rules. This
 # example permits one adapter boundary to reference composition-root wiring.

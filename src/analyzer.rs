@@ -17,7 +17,102 @@ use crate::model::{
     AnalysisDiagnostic, Dependency, DependencyGraph, Evidence, Module, OpaqueReexport,
 };
 
-const STANDARD_CRATES: [&str; 5] = ["alloc", "core", "proc_macro", "std", "test"];
+const STANDARD_CRATES: [&str; 4] = ["alloc", "core", "proc_macro", "std"];
+const STANDARD_PRELUDE_NAMES: &[&str] = &[
+    "AsMut",
+    "AsRef",
+    "AsyncFn",
+    "AsyncFnMut",
+    "AsyncFnOnce",
+    "Box",
+    "Clone",
+    "Copy",
+    "Debug",
+    "Default",
+    "DoubleEndedIterator",
+    "Drop",
+    "Eq",
+    "Err",
+    "ExactSizeIterator",
+    "Extend",
+    "Fn",
+    "FnMut",
+    "FnOnce",
+    "From",
+    "FromIterator",
+    "Future",
+    "Hash",
+    "Into",
+    "IntoFuture",
+    "IntoIterator",
+    "Iterator",
+    "None",
+    "Ok",
+    "Option",
+    "Ord",
+    "PartialEq",
+    "PartialOrd",
+    "Result",
+    "Send",
+    "Sized",
+    "Some",
+    "String",
+    "Sync",
+    "ToOwned",
+    "ToString",
+    "TryFrom",
+    "TryInto",
+    "Unpin",
+    "Vec",
+    "align_of",
+    "align_of_val",
+    "alloc_error_handler",
+    "assert",
+    "assert_eq",
+    "assert_ne",
+    "bench",
+    "cfg",
+    "column",
+    "compile_error",
+    "concat",
+    "dbg",
+    "debug_assert",
+    "debug_assert_eq",
+    "debug_assert_ne",
+    "derive",
+    "drop",
+    "env",
+    "eprint",
+    "eprintln",
+    "file",
+    "format",
+    "format_args",
+    "global_allocator",
+    "include",
+    "include_bytes",
+    "include_str",
+    "is_x86_feature_detected",
+    "line",
+    "matches",
+    "module_path",
+    "option_env",
+    "panic",
+    "print",
+    "println",
+    "size_of",
+    "size_of_val",
+    "stringify",
+    "test",
+    "test_case",
+    "thread_local",
+    "todo",
+    "try",
+    "unimplemented",
+    "unreachable",
+    "vec",
+    "write",
+    "writeln",
+];
 
 pub struct AnalysisOptions<'a> {
     pub root: &'a Path,
@@ -103,20 +198,19 @@ pub fn analyze(options: AnalysisOptions<'_>) -> anyhow::Result<DependencyGraph> 
         .root
         .canonicalize()
         .with_context(|| format!("analysis root does not exist: {}", options.root.display()))?;
-    let manifest_path = options.manifest_path.map(|path| {
-        if path.is_absolute() {
-            path.to_path_buf()
-        } else {
-            root.join(path)
-        }
-    });
+    let manifest_path = match options.manifest_path {
+        Some(path) if path.is_absolute() => path.to_path_buf(),
+        Some(path) => root.join(path),
+        None => root.join("Cargo.toml"),
+    };
+    if !manifest_path.is_file() {
+        bail!("Cargo manifest does not exist: {}", manifest_path.display());
+    }
 
     let mut command = MetadataCommand::new();
     command.current_dir(&root).no_deps();
     command.other_options(vec!["--offline".to_owned()]);
-    if let Some(path) = &manifest_path {
-        command.manifest_path(path);
-    }
+    command.manifest_path(&manifest_path);
     let metadata = command
         .exec()
         .context("cargo metadata failed in offline mode")?;
@@ -733,12 +827,20 @@ impl Analyzer {
                     .expect("workspace alias was checked");
                 segments = &segments[1..];
             }
-            first
-                if target.external_aliases.contains(first) || STANDARD_CRATES.contains(&first) =>
-            {
-                return Resolution::External;
-            }
+            first if target.external_aliases.contains(first) => return Resolution::External,
+            first if STANDARD_CRATES.contains(&first) => return Resolution::External,
             first => {
+                if let Some(resolution) =
+                    self.resolve_top_level_module(raw, segments, imports, &target.name)
+                {
+                    return resolution;
+                }
+                if STANDARD_PRELUDE_NAMES.contains(&first) {
+                    return Resolution::External;
+                }
+                if self.is_crate_root_item(raw, first) {
+                    return Resolution::LocalItem;
+                }
                 return if raw.origin == DependencyOrigin::Path {
                     Resolution::LocalItem
                 } else {
@@ -765,6 +867,32 @@ impl Analyzer {
             return Resolution::LocalItem;
         }
         resolution
+    }
+
+    fn resolve_top_level_module(
+        &self,
+        raw: &RawDependency,
+        segments: &[String],
+        imports: &BTreeMap<(String, String), ImportBinding>,
+        target_name: &str,
+    ) -> Option<Resolution> {
+        self.module_paths
+            .contains_key(&(raw.target_root.clone(), segments[0].clone()))
+            .then(|| {
+                self.resolve_candidate(
+                    &raw.target_root,
+                    segments,
+                    imports,
+                    &raw.evidence.expression,
+                    target_name,
+                )
+            })
+    }
+
+    fn is_crate_root_item(&self, raw: &RawDependency, name: &str) -> bool {
+        self.module_items
+            .get(&(raw.target_root.clone(), String::new()))
+            .is_some_and(|items| items.contains(name))
     }
 
     fn resolve_candidate(

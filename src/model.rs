@@ -2,6 +2,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde::Serialize;
 
+pub const SCHEMA_VERSION: u32 = 1;
+
 #[derive(Debug, Clone, Eq, PartialEq, Ord, PartialOrd, Serialize)]
 pub struct Module {
     pub id: String,

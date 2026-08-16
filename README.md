@@ -25,6 +25,10 @@ Machine-readable output is stable and versioned:
 hav check --root . --format json
 ```
 
+JSON always uses the same `ValidationReport` document, including configuration
+and discovery failures. Its `outcome` is exactly `passed`, `violations`, or
+`analysis-failure`. Text reports for all three outcomes are written to stdout.
+
 Exit codes are part of the CLI contract:
 
 | Code | Meaning |
@@ -49,25 +53,26 @@ preset = "hexagonal"
 strict = true
 detect_cycles = true
 
+# Paths are relative to the Cargo workspace root.
 [[roles]]
 id = "core"
-paths = ["^src/core(?:/|\\.rs$)"]
+paths = ["^(?:crates/[^/]+/)?src/core(?:/|\\.rs$)"]
 
 [[roles]]
 id = "application"
-paths = ["^src/application(?:/|\\.rs$)"]
+paths = ["^(?:crates/[^/]+/)?src/application(?:/|\\.rs$)"]
 
 [[roles]]
 id = "port"
-paths = ["^src/ports(?:/|\\.rs$)"]
+paths = ["^(?:crates/[^/]+/)?src/ports(?:/|\\.rs$)"]
 
 [[roles]]
 id = "adapter"
-paths = ["^src/adapters(?:/|\\.rs$)"]
+paths = ["^(?:crates/[^/]+/)?src/adapters(?:/|\\.rs$)"]
 
 [[roles]]
 id = "composition-root"
-paths = ["^src/main\\.rs$", "^src/bin/[^/]+\\.rs$"]
+paths = ["^(?:crates/[^/]+/)?src/main\\.rs$", "^(?:crates/[^/]+/)?src/bin/[^/]+\\.rs$"]
 ```
 
 See [Configuration](docs/CONFIGURATION.md) for the complete schema and preset
@@ -75,7 +80,8 @@ contract.
 
 ## Analysis model
 
-`hav` invokes `cargo metadata --format-version 1 --no-deps --offline`, excludes
+`hav` invokes `cargo metadata --format-version 1 --no-deps --offline` for
+`--root/Cargo.toml` unless `--manifest-path` is supplied, excludes
 custom build-script targets, parses Rust source with `syn`, discovers file and
 inline modules, and resolves local plus workspace-crate imports. Findings,
 paths, modules, edges, and diagnostics are sorted deterministically.
@@ -85,8 +91,10 @@ Strict analysis defaults on; `strict = false` is the explicit opt-out for
 unsupported item-position macros. Bare and qualified `include!` forms always
 fail analysis. Repeated cfg declarations coalesce only when they resolve to the
 same canonical file, and module sources cannot escape the Cargo workspace via
-absolute paths, traversal, or symlinks. All reports list the remaining
-false-positive and false-negative risks. See
+absolute paths, traversal, or symlinks. JSON reports that reach rule evaluation
+list the remaining false-positive and false-negative risks. Text reports do not
+render these limitations, and failures returned before evaluation use an empty
+JSON limitations list. See
 [Analysis and limitations](docs/ANALYSIS.md).
 
 ## Development

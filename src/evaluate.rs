@@ -2,8 +2,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::config::{LoadedConfig, classify_modules};
 use crate::model::{
-    AnalysisDiagnostic, AppliedExemption, DependencyGraph, Finding, FindingKind, Outcome, Summary,
-    ValidationReport,
+    AnalysisDiagnostic, AppliedExemption, DependencyGraph, Finding, FindingKind, Outcome,
+    SCHEMA_VERSION, Summary, ValidationReport,
 };
 
 const LIMITATIONS: [&str; 5] = [
@@ -52,7 +52,7 @@ pub fn evaluate(mut graph: DependencyGraph, config: &LoadedConfig) -> Validation
     };
 
     ValidationReport {
-        schema_version: 1,
+        schema_version: SCHEMA_VERSION,
         tool_version: env!("CARGO_PKG_VERSION"),
         outcome,
         summary,
