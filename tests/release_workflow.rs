@@ -13,16 +13,41 @@ fn smoke_step(workflow: &str) -> Result<&str, String> {
     Ok(&rest[..end])
 }
 
-fn validate_smoke_step(workflow: &str) -> Result<(), String> {
-    let smoke = smoke_step(workflow)?;
-    if smoke.lines().any(|line| {
-        line.trim()
-            .strip_prefix("continue-on-error:")
-            .is_some_and(|value| value.trim() == "true")
-    }) {
-        return Err("smoke step must not continue on error".to_owned());
+fn release_job<'a>(workflow: &'a str, job: &str) -> Result<&'a str, String> {
+    let marker = format!("  {job}:\n");
+    let start = workflow
+        .find(&marker)
+        .ok_or_else(|| format!("release workflow must define the '{job}' job"))?;
+    let rest = &workflow[start..];
+    let mut end = rest.len();
+    let mut offset = marker.len();
+    for line in rest[marker.len()..].split_inclusive('\n') {
+        if line.starts_with("  ") && !line.starts_with("   ") {
+            end = offset;
+            break;
+        }
+        offset += line.len();
     }
+    Ok(&rest[..end])
+}
 
+fn validate_release_jobs_fail_closed(workflow: &str) -> Result<(), String> {
+    for job in ["build", "publish"] {
+        if release_job(workflow, job)?
+            .lines()
+            .any(|line| line.trim_start().starts_with("continue-on-error:"))
+        {
+            return Err(format!(
+                "release job '{job}' must not declare continue-on-error"
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_smoke_step(workflow: &str) -> Result<(), String> {
+    validate_release_jobs_fail_closed(workflow)?;
+    let smoke = smoke_step(workflow)?;
     let run = smoke
         .split_once("        run: |\n")
         .map(|(_, run)| run)
@@ -105,6 +130,50 @@ fn release_smoke_validation_rejects_fail_open_mutations() {
                 &workflow,
                 "        shell: bash",
                 "        continue-on-error: true\n        shell: bash",
+            ),
+        ),
+        (
+            "capitalized continue on error",
+            mutate_smoke_step(
+                &workflow,
+                "        shell: bash",
+                "        continue-on-error: True\n        shell: bash",
+            ),
+        ),
+        (
+            "uppercase continue on error",
+            mutate_smoke_step(
+                &workflow,
+                "        shell: bash",
+                "        continue-on-error: TRUE\n        shell: bash",
+            ),
+        ),
+        (
+            "quoted continue on error",
+            mutate_smoke_step(
+                &workflow,
+                "        shell: bash",
+                "        continue-on-error: \"true\"\n        shell: bash",
+            ),
+        ),
+        (
+            "yes continue on error",
+            mutate_smoke_step(
+                &workflow,
+                "        shell: bash",
+                "        continue-on-error: yes\n        shell: bash",
+            ),
+        ),
+        (
+            "build job continues on error",
+            workflow.replacen("  build:\n", "  build:\n    continue-on-error: true\n", 1),
+        ),
+        (
+            "publish job continues on error",
+            workflow.replacen(
+                "  publish:\n",
+                "  publish:\n    continue-on-error: true\n",
+                1,
             ),
         ),
         (
