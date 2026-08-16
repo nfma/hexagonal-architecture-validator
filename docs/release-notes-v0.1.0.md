@@ -1,7 +1,7 @@
-# hexagonal-architecture-validator v0.1.0 (cancelled)
+# hexagonal-architecture-validator v0.1.0 (superseded)
 
-The signed tag is retained for auditability. Its release workflow was cancelled
-before packaging, attestations, or GitHub Release creation. Use v0.1.1 instead.
+The signed tag and GitHub Release are retained for auditability. This version
+was built before the final block-local module shadowing fix. Use v0.1.1 instead.
 
 First release of `hav`, a deterministic Rust dependency-boundary validator.
 

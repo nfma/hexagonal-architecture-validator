@@ -28,6 +28,6 @@ Distribution is GitHub-only. `Cargo.toml` disables Cargo registry publication,
 and the release workflow does not publish to npm, crates.io, or another package
 registry.
 
-The signed `v0.1.0` tag is retained for auditability, but its workflow was
-cancelled before packaging, attestations, or GitHub Release creation. Do not
-rerun that tag; `v0.1.1` is the first usable release candidate.
+The signed `v0.1.0` tag and GitHub Release are retained for auditability. They
+were built from `a60fa17` before the final block-local module shadowing fix and
+are superseded by `v0.1.1`.

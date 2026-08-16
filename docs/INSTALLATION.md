@@ -1,6 +1,6 @@
 # Installation and verification
 
-The first release publishes these archives:
+The current release publishes these archives:
 
 - `hexagonal-architecture-validator-v0.1.1-aarch64-apple-darwin.tar.gz`
 - `hexagonal-architecture-validator-v0.1.1-x86_64-unknown-linux-gnu.tar.gz`
