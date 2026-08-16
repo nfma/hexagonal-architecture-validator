@@ -4,7 +4,7 @@
 It discovers Cargo workspace targets and Rust modules, builds a normalized static
 dependency graph, then evaluates explicit role-based rules. The built-in
 hexagonal preset catches dependencies from core, application, or port code to
-concrete adapters and keeps composition-root wiring explicit.
+concrete adapters and keeps narrow exceptions explicit and auditable.
 
 The result is architecture evidence, not a claim that folder names or static
 dependencies prove architectural quality.
@@ -25,6 +25,10 @@ Machine-readable output is stable and versioned:
 hav check --root . --format json
 ```
 
+JSON always uses the same `ValidationReport` document, including configuration
+and discovery failures. Its `outcome` is exactly `passed`, `violations`, or
+`analysis-failure`. Text reports for all three outcomes are written to stdout.
+
 Exit codes are part of the CLI contract:
 
 | Code | Meaning |
@@ -36,9 +40,10 @@ Exit codes are part of the CLI contract:
 ## Configuration
 
 Configuration is explicit and versioned. Roles map module IDs or normalized
-workspace-relative source paths to architectural intent. Forbidden rules match
-dependencies by source and target roles. Allowed rules are named, explicit
-exceptions evaluated before forbidden rules.
+workspace-relative source paths to architectural intent. Every declared role
+must match at least one module. Forbidden rules match dependencies by source and
+target roles. Allowed rules must name the exact forbidden IDs they exempt, and
+every applied exemption appears in JSON and text reports.
 
 ```toml
 version = 1
@@ -48,13 +53,26 @@ preset = "hexagonal"
 strict = true
 detect_cycles = true
 
+# Paths are relative to the Cargo workspace root.
 [[roles]]
 id = "core"
-paths = ["^src/core(?:/|\\.rs$)"]
+paths = ["^(?:crates/[^/]+/)?src/core(?:/|\\.rs$)"]
+
+[[roles]]
+id = "application"
+paths = ["^(?:crates/[^/]+/)?src/application(?:/|\\.rs$)"]
+
+[[roles]]
+id = "port"
+paths = ["^(?:crates/[^/]+/)?src/ports(?:/|\\.rs$)"]
 
 [[roles]]
 id = "adapter"
-paths = ["^src/adapters(?:/|\\.rs$)"]
+paths = ["^(?:crates/[^/]+/)?src/adapters(?:/|\\.rs$)"]
+
+[[roles]]
+id = "composition-root"
+paths = ["^(?:crates/[^/]+/)?src/main\\.rs$", "^(?:crates/[^/]+/)?src/bin/[^/]+\\.rs$"]
 ```
 
 See [Configuration](docs/CONFIGURATION.md) for the complete schema and preset
@@ -62,15 +80,22 @@ contract.
 
 ## Analysis model
 
-`hav` invokes `cargo metadata --format-version 1 --no-deps --offline`, excludes
+`hav` invokes `cargo metadata --format-version 1 --no-deps --offline` for
+`--root/Cargo.toml` unless `--manifest-path` is supplied, excludes
 custom build-script targets, parses Rust source with `syn`, discovers file and
 inline modules, and resolves local plus workspace-crate imports. Findings,
 paths, modules, edges, and diagnostics are sorted deterministically.
 
 Macro expansion and cfg evaluation are deliberately outside the first release.
-`include!` is an analysis error; `--strict` also makes item-position macro
-invocations analysis errors. All reports list the remaining false-positive and
-false-negative risks. See [Analysis and limitations](docs/ANALYSIS.md).
+Strict analysis defaults on; `strict = false` is the explicit opt-out for
+unsupported item-position macros. Bare and qualified `include!` forms always
+fail analysis. Repeated cfg declarations coalesce only when they resolve to the
+same canonical file, and module sources cannot escape the Cargo workspace via
+absolute paths, traversal, or symlinks. JSON reports that reach rule evaluation
+list the remaining false-positive and false-negative risks. Text reports do not
+render these limitations, and failures returned before evaluation use an empty
+JSON limitations list. See
+[Analysis and limitations](docs/ANALYSIS.md).
 
 ## Development
 

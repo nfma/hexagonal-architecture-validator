@@ -11,6 +11,7 @@ Replace `v0.1.0` below only when intentionally upgrading a pinned installation.
 ## macOS Apple Silicon
 
 ```console
+set -euo pipefail
 version=v0.1.0
 artifact="hexagonal-architecture-validator-${version}-aarch64-apple-darwin.tar.gz"
 base="https://github.com/nfma/hexagonal-architecture-validator/releases/download/${version}"
@@ -28,6 +29,7 @@ not writable.
 ## Linux x86-64
 
 ```console
+set -euo pipefail
 version=v0.1.0
 artifact="hexagonal-architecture-validator-${version}-x86_64-unknown-linux-gnu.tar.gz"
 base="https://github.com/nfma/hexagonal-architecture-validator/releases/download/${version}"

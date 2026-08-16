@@ -3,10 +3,11 @@
   "tool_version": "0.1.0",
   "outcome": "violations",
   "summary": {
-    "modules": 3,
+    "modules": 6,
     "dependencies": 1,
     "violations": 1,
-    "analysis_errors": 0
+    "analysis_errors": 0,
+    "exemptions": 0
   },
   "modules": [
     {
@@ -24,11 +25,32 @@
       "source": "src/adapter.rs"
     },
     {
+      "id": "violating-fixture::lib(violating_fixture)::application",
+      "package": "violating-fixture",
+      "target": "violating-fixture::lib(violating_fixture)",
+      "module": "violating-fixture::lib(violating_fixture)::application",
+      "source": "src/lib.rs"
+    },
+    {
+      "id": "violating-fixture::lib(violating_fixture)::composition_root",
+      "package": "violating-fixture",
+      "target": "violating-fixture::lib(violating_fixture)",
+      "module": "violating-fixture::lib(violating_fixture)::composition_root",
+      "source": "src/lib.rs"
+    },
+    {
       "id": "violating-fixture::lib(violating_fixture)::core",
       "package": "violating-fixture",
       "target": "violating-fixture::lib(violating_fixture)",
       "module": "violating-fixture::lib(violating_fixture)::core",
       "source": "src/core.rs"
+    },
+    {
+      "id": "violating-fixture::lib(violating_fixture)::port",
+      "package": "violating-fixture",
+      "target": "violating-fixture::lib(violating_fixture)",
+      "module": "violating-fixture::lib(violating_fixture)::port",
+      "source": "src/lib.rs"
     }
   ],
   "dependencies": [
@@ -56,10 +78,12 @@
       }
     }
   ],
+  "exemptions": [],
   "analysis_errors": [],
   "limitations": [
-    "cfg predicates are not evaluated; all syntactically present branches are analyzed",
+    "cfg predicates are not evaluated; repeated same-source bodies are all analyzed, differing files fail, and conditional path attributes fail closed",
     "procedural and declarative macros are not expanded",
+    "public re-export routes fail closed when a configured forbidden rule matches the source to the re-export or resolved target; the full pub-use graph is not followed",
     "method calls, dynamic dispatch, and runtime relationships do not create dependency edges",
     "a passing result is evidence for declared static boundaries, not proof of architectural quality"
   ]

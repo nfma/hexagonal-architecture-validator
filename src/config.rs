@@ -8,6 +8,8 @@ use serde::Deserialize;
 
 const SUPPORTED_CONFIG_VERSION: u32 = 1;
 const ID_PATTERN: &str = r"^[a-z][a-z0-9-]*$";
+const HEXAGONAL_ROLE_IDS: [&str; 5] =
+    ["core", "application", "port", "adapter", "composition-root"];
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -41,7 +43,7 @@ pub struct AnalysisConfig {
 impl Default for AnalysisConfig {
     fn default() -> Self {
         Self {
-            strict: false,
+            strict: true,
             detect_cycles: true,
         }
     }
@@ -67,6 +69,7 @@ struct RuleFile {
     description: Option<String>,
     from: Vec<String>,
     to: Vec<String>,
+    exempts: Option<Vec<String>>,
 }
 
 #[derive(Debug)]
@@ -95,6 +98,7 @@ pub struct Rule {
     pub description: Option<String>,
     pub from: BTreeSet<String>,
     pub to: BTreeSet<String>,
+    pub exempts: BTreeSet<String>,
 }
 
 impl Rule {
@@ -138,7 +142,7 @@ impl LoadedConfig {
             .collect::<anyhow::Result<Vec<_>>>()?;
 
         let mut rules = file.forbidden;
-        if let Some(Preset::Hexagonal) = file.preset {
+        if matches!(file.preset, Some(Preset::Hexagonal)) {
             require_hexagonal_roles(&seen_role_ids)?;
             rules.extend(hexagonal_rules());
         }
@@ -146,12 +150,32 @@ impl LoadedConfig {
         let mut seen_rule_ids = BTreeSet::new();
         let forbidden = rules
             .into_iter()
-            .map(|rule| compile_rule(rule, &id_pattern, &seen_role_ids, &mut seen_rule_ids))
+            .map(|rule| {
+                compile_forbidden_rule(rule, &id_pattern, &seen_role_ids, &mut seen_rule_ids)
+            })
             .collect::<anyhow::Result<Vec<_>>>()?;
+        let forbidden_ids = forbidden
+            .iter()
+            .map(|rule| rule.id.clone())
+            .collect::<BTreeSet<_>>();
+        let allowed_ids = file
+            .allowed
+            .iter()
+            .map(|rule| rule.id.clone())
+            .collect::<BTreeSet<_>>();
         let allowed = file
             .allowed
             .into_iter()
-            .map(|rule| compile_rule(rule, &id_pattern, &seen_role_ids, &mut seen_rule_ids))
+            .map(|rule| {
+                compile_allowed_rule(
+                    rule,
+                    &id_pattern,
+                    &seen_role_ids,
+                    &forbidden_ids,
+                    &allowed_ids,
+                    &mut seen_rule_ids,
+                )
+            })
             .collect::<anyhow::Result<Vec<_>>>()?;
 
         Ok(Self {
@@ -184,13 +208,68 @@ fn compile_role(
     })
 }
 
-fn compile_rule(
+fn compile_forbidden_rule(
     rule: RuleFile,
     id_pattern: &Regex,
     role_ids: &BTreeSet<String>,
     seen_ids: &mut BTreeSet<String>,
 ) -> anyhow::Result<Rule> {
+    if rule.exempts.is_some() {
+        bail!("forbidden rule '{}' cannot declare exempts", rule.id);
+    }
     validate_id("rule", &rule.id, id_pattern, seen_ids)?;
+    compile_rule(rule, role_ids, BTreeSet::new())
+}
+
+fn compile_allowed_rule(
+    rule: RuleFile,
+    id_pattern: &Regex,
+    role_ids: &BTreeSet<String>,
+    forbidden_ids: &BTreeSet<String>,
+    allowed_ids: &BTreeSet<String>,
+    seen_ids: &mut BTreeSet<String>,
+) -> anyhow::Result<Rule> {
+    validate_id("rule", &rule.id, id_pattern, seen_ids)?;
+    let exempts = rule
+        .exempts
+        .as_ref()
+        .filter(|ids| !ids.is_empty())
+        .ok_or_else(|| {
+            anyhow::anyhow!("allowed rule '{}' must declare non-empty exempts", rule.id)
+        })?
+        .iter()
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    for exempted in &exempts {
+        if exempted == &rule.id {
+            bail!(
+                "allowed rule '{}' cannot exempt itself; expected a forbidden rule ID",
+                rule.id
+            );
+        }
+        if !forbidden_ids.contains(exempted) {
+            if allowed_ids.contains(exempted) {
+                bail!(
+                    "allowed rule '{}' cannot exempt allowed rule '{}'",
+                    rule.id,
+                    exempted
+                );
+            }
+            bail!(
+                "allowed rule '{}' refers to unknown forbidden rule '{}'",
+                rule.id,
+                exempted
+            );
+        }
+    }
+    compile_rule(rule, role_ids, exempts)
+}
+
+fn compile_rule(
+    rule: RuleFile,
+    role_ids: &BTreeSet<String>,
+    exempts: BTreeSet<String>,
+) -> anyhow::Result<Rule> {
     if rule.from.is_empty() || rule.to.is_empty() {
         bail!(
             "rule '{}' must declare non-empty from and to lists",
@@ -211,6 +290,7 @@ fn compile_rule(
         description: rule.description,
         from,
         to,
+        exempts,
     })
 }
 
@@ -240,7 +320,7 @@ fn compile_patterns(kind: &str, role: &str, patterns: Vec<String>) -> anyhow::Re
 }
 
 fn require_hexagonal_roles(role_ids: &BTreeSet<String>) -> anyhow::Result<()> {
-    for required in ["core", "application", "port", "adapter", "composition-root"] {
+    for required in HEXAGONAL_ROLE_IDS {
         if !role_ids.contains(required) {
             bail!("hexagonal preset requires a '{required}' role");
         }
@@ -255,42 +335,49 @@ fn hexagonal_rules() -> Vec<RuleFile> {
             description: Some("Core code must not depend on concrete adapters".to_owned()),
             from: vec!["core".to_owned()],
             to: vec!["adapter".to_owned()],
+            exempts: None,
         },
         RuleFile {
             id: "core-must-not-depend-on-composition-root".to_owned(),
             description: Some("Core code must not depend on application wiring".to_owned()),
             from: vec!["core".to_owned()],
             to: vec!["composition-root".to_owned()],
+            exempts: None,
         },
         RuleFile {
             id: "application-must-not-depend-on-adapters".to_owned(),
             description: Some("Application code must depend on ports, not adapters".to_owned()),
             from: vec!["application".to_owned()],
             to: vec!["adapter".to_owned()],
+            exempts: None,
         },
         RuleFile {
             id: "application-must-not-depend-on-composition-root".to_owned(),
             description: Some("Application code must not depend on application wiring".to_owned()),
             from: vec!["application".to_owned()],
             to: vec!["composition-root".to_owned()],
+            exempts: None,
         },
         RuleFile {
             id: "ports-must-not-depend-on-adapters".to_owned(),
             description: Some("Ports must not depend on concrete adapters".to_owned()),
             from: vec!["port".to_owned()],
             to: vec!["adapter".to_owned()],
+            exempts: None,
         },
         RuleFile {
             id: "ports-must-not-depend-on-composition-root".to_owned(),
             description: Some("Ports must not depend on application wiring".to_owned()),
             from: vec!["port".to_owned()],
             to: vec!["composition-root".to_owned()],
+            exempts: None,
         },
         RuleFile {
             id: "adapters-must-not-depend-on-composition-root".to_owned(),
             description: Some("Adapters must not depend on application wiring".to_owned()),
             from: vec!["adapter".to_owned()],
             to: vec!["composition-root".to_owned()],
+            exempts: None,
         },
     ]
 }

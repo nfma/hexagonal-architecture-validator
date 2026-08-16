@@ -1,0 +1,6 @@
+[package]
+name = "test-local-2015-fixture"
+version = "0.1.0"
+edition = "2015"
+
+[workspace]

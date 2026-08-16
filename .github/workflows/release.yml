@@ -27,11 +27,12 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: Verify tag matches crate version
+      - name: Verify tag and release notes
         shell: bash
         run: |
           crate_version="$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -1)"
           test "v${crate_version}" = "${GITHUB_REF_NAME}"
+          test -f "docs/release-notes-${GITHUB_REF_NAME}.md"
       - name: Install Rust target
         run: rustup target add "${{ matrix.target }}" --toolchain stable
       - name: Run release tests
@@ -48,6 +49,16 @@ jobs:
           cp "target/${TARGET}/release/hav" dist/package/hav
           cp README.md LICENSE dist/package/
           tar -C dist/package -czf "dist/${artifact}" hav README.md LICENSE
+      - name: Smoke-test packaged binary
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          artifact="dist/hexagonal-architecture-validator-${GITHUB_REF_NAME}-${TARGET}.tar.gz"
+          smoke_dir="$(mktemp -d)"
+          tar -C "${smoke_dir}" -xzf "${artifact}"
+          "${smoke_dir}/hav" --version
+          "${smoke_dir}/hav" check --root "${GITHUB_WORKSPACE}" --config hav.toml --format json > /dev/null
       - name: Upload release archive
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -85,9 +96,11 @@ jobs:
       - name: Create GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: >-
-          gh release create "${GITHUB_REF_NAME}"
-          dist/*.tar.gz dist/SHA256SUMS
-          --verify-tag
-          --title "hexagonal-architecture-validator ${GITHUB_REF_NAME}"
-          --notes-file docs/release-notes-v0.1.0.md
+        shell: bash
+        run: |
+          notes_file="docs/release-notes-${GITHUB_REF_NAME}.md"
+          gh release create "${GITHUB_REF_NAME}" \
+            dist/*.tar.gz dist/SHA256SUMS \
+            --verify-tag \
+            --title "hexagonal-architecture-validator ${GITHUB_REF_NAME}" \
+            --notes-file "${notes_file}"

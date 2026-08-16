@@ -35,7 +35,10 @@ a smaller role-based Rust schema:
 - Every non-build-script Rust target in every Cargo workspace package.
 - File modules (`mod name;`), `name.rs`, `name/mod.rs`, inline modules, and
   literal `#[path = "..."]` modules.
-- `use`, `pub use`, `extern crate`, and syntactic qualified paths.
+- `use`, `pub use`, `extern crate`, and syntactic qualified paths. Lexical alias
+  chains retain their terminal module. Public re-export routes are recorded,
+  and a route that could cross a forbidden boundary fails closed because v0.1
+  does not model the complete visibility graph.
 - Local `crate`, `self`, and `super` paths.
 - Renamed and unrenamed direct dependencies between workspace library crates.
 - Module-level dependency cycles.
@@ -45,20 +48,33 @@ repository writes by the validator. Analysis only reads manifests and source.
 
 ## Determinism
 
-- Paths use `/`, are lexical and workspace-relative, and contain no timestamps.
+- Paths use `/`, are canonicalized for containment, rendered workspace-relative,
+  and contain no timestamps.
 - Modules, dependencies, findings, diagnostics, roles, and cycle members use
   ordered collections and stable sorting.
 - Multiple references between the same source and target module become one
   edge with the earliest sorted source evidence.
-- JSON has `schema_version = 1`; all fields are emitted in a fixed structure.
+- JSON has `schema_version = 1`; all top-level report fields are emitted in a
+  fixed structure.
+
+Every JSON result is a `ValidationReport` with one of three outcomes: `passed`,
+`violations`, or `analysis-failure`. Configuration and discovery failures use
+the same report shape with empty module, dependency, finding, exemption, and
+limitation collections and one entry in `analysis_errors`.
 
 ## Explicit limitations
 
-These limitations can create false positives or false negatives and are listed
-in every JSON report and the release notes:
+These limitations can create false positives or false negatives. Reports that
+reach evaluation include this list in JSON output; text output does not render
+it. Configuration, discovery, and other failures returned before evaluation
+use the full JSON report shape with an empty `limitations` list.
 
-- `cfg` predicates and Cargo feature selection are not evaluated. All
-  syntactically present branches are analyzed, which may add inactive edges.
+- `cfg` predicates and Cargo feature selection are not evaluated. Every repeated
+  inline body for one module is analyzed, while repeated file declarations that
+  resolve to the same canonical file coalesce. If the same module resolves to
+  different files across syntactic branches, analysis fails with
+  `cfg-ambiguous-module` rather than choosing a branch. A conditional
+  `#[cfg_attr(..., path = ...)]` fails closed as `unresolved-module`.
 - Declarative and procedural macros, derives, and attribute macros are not
   expanded. Generated modules or imports can therefore be missed.
 - `include!` always fails analysis. With strict analysis, other item-position
@@ -68,13 +84,33 @@ in every JSON report and the release notes:
   runtime service lookup do not create edges.
 - External crates are recognized from Cargo dependency declarations but are not
   parsed. v0.1 rules validate workspace modules and workspace-crate edges.
-- Literal `#[path]` is supported, but macro-computed paths are not Rust syntax
-  and custom nested layout behavior should be covered by project fixtures.
+- Literal `#[path]` is supported and resolves from the declaring file or inline
+  module directory, matching rustc. Its child modules resolve from the selected
+  path file's parent directory. The canonical source must remain inside the Cargo
+  workspace; absolute paths, `..` traversal, and symlinks cannot escape it.
+  Conditional path attributes fail closed, and macro-computed paths are not Rust
+  syntax.
 - Build scripts are excluded. Generated source in `OUT_DIR` is not analyzed.
 - A pass means no violations were found in this declared static model. It does
   not decide whether ports are meaningful, business logic belongs in the core,
   adapters translate correctly, or the chosen boundaries fit the product.
 
-Unresolved file modules, parse failures, ambiguous module files, unsupported
-`include!`, and unknown import roots fail with exit code 2. They cannot be
-reported as a clean architectural pass.
+## Stable analysis diagnostic codes
+
+| Code | Meaning |
+| --- | --- |
+| `configuration-or-analysis-error` | Configuration loading or another top-level analysis failure prevented evaluation. |
+| `cfg-ambiguous-module` | Repeated declarations of one module resolve to different canonical files. |
+| `module-outside-workspace` | A module source resolves outside the canonical Cargo workspace root. |
+| `opaque-reexport` | A dependency route through a public re-export could cross a configured forbidden rule that v0.1 cannot follow completely. |
+| `parse-failed` | A discovered Rust source file cannot be parsed by `syn`. |
+| `recursive-module-source` | A module recursively resolves to a canonical source already being inspected. |
+| `role-matched-no-modules` | A declared role matches no discovered module. |
+| `source-read-failed` | A source cannot be canonicalized or read. |
+| `unresolved-import` | A `use` or qualified path cannot be resolved to a known item or module. |
+| `unresolved-module` | A `mod` declaration has no valid source, uses a conditional path attribute, or is ambiguous. |
+| `unsupported-include` | Any bare or qualified `include!` invocation requires unsupported expansion. |
+| `unsupported-item-macro` | Strict analysis encountered another item-position macro it cannot expand. |
+
+Every diagnostic in this table fails with exit code 2 and cannot be reported as
+a clean architectural pass.
