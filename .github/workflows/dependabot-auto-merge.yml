@@ -1,0 +1,31 @@
+name: Auto-merge eligibility signal
+
+on:
+  pull_request:
+    types:
+      - opened
+      - reopened
+      - synchronize
+      - ready_for_review
+      - converted_to_draft
+      - labeled
+      - unlabeled
+  pull_request_review:
+    types: [submitted, edited, dismissed]
+  pull_request_review_comment:
+    types: [created, edited, deleted]
+
+permissions: {}
+
+concurrency:
+  group: auto-merge-signal-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  signal:
+    name: Record eligibility event
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Record event
+        run: echo "Eligibility is evaluated by the default-branch reconciler."

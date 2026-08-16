@@ -1,0 +1,318 @@
+name: Auto-merge reconciler
+
+on:
+  workflow_run: # zizmor: ignore[dangerous-triggers] No PR checkout, artifact, cache, or code.
+    workflows:
+      - Auto-merge eligibility signal
+      - Build and release
+      - CI
+      - CodeQL
+      - Dependency audit
+      - Dependency review
+      - Quality
+      - Repository quality
+      - Security
+      - Self audit
+      - Skill audit
+      - SonarQube Cloud
+      - Tests
+    types: [completed]
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pull-requests: read
+
+concurrency:
+  group: auto-merge-reconciler
+  cancel-in-progress: false
+
+jobs:
+  reconcile:
+    name: Reconcile eligible pull requests
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Create repository-scoped App token
+        id: app-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ vars.NFMA_AUTO_MERGE_CLIENT_ID }}
+          private-key: ${{ secrets.NFMA_AUTO_MERGE_PRIVATE_KEY }}
+          permission-contents: write
+          permission-pull-requests: write
+
+      - name: Reconcile current API state
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        with:
+          github-token: ${{ steps.app-token.outputs.token }}
+          script: |
+            const trustedAuthors = new Set(["nfma", "dependabot[bot]"]);
+            const repositoryFullName = context.repo.owner + "/" + context.repo.repo;
+
+            const pullStateQuery = `
+              query PullState($owner: String!, $repo: String!, $number: Int!) {
+                repository(owner: $owner, name: $repo) {
+                  defaultBranchRef {
+                    name
+                  }
+                  pullRequest(number: $number) {
+                    id
+                    number
+                    isDraft
+                    headRefOid
+                    baseRefName
+                    mergeable
+                    mergeStateStatus
+                    reviewDecision
+                    author {
+                      login
+                    }
+                    headRepository {
+                      nameWithOwner
+                    }
+                    baseRepository {
+                      nameWithOwner
+                    }
+                    autoMergeRequest {
+                      mergeMethod
+                    }
+                    statusCheckRollup {
+                      state
+                    }
+                  }
+                }
+              }
+            `;
+
+            const reviewThreadsQuery = `
+              query ReviewThreads($id: ID!, $cursor: String) {
+                node(id: $id) {
+                  ... on PullRequest {
+                    reviewThreads(first: 100, after: $cursor) {
+                      nodes {
+                        isResolved
+                      }
+                      pageInfo {
+                        hasNextPage
+                        endCursor
+                      }
+                    }
+                  }
+                }
+              }
+            `;
+
+            async function allReviewThreadsResolved(pullRequestId) {
+              let cursor = null;
+              for (;;) {
+                const result = await github.graphql(reviewThreadsQuery, {
+                  id: pullRequestId,
+                  cursor,
+                });
+                const threads = result.node?.reviewThreads;
+                if (!threads) {
+                  return false;
+                }
+                if (threads.nodes.some((thread) => !thread.isResolved)) {
+                  return false;
+                }
+                if (!threads.pageInfo.hasNextPage) {
+                  return true;
+                }
+                cursor = threads.pageInfo.endCursor;
+                if (!cursor) {
+                  return false;
+                }
+              }
+            }
+
+            async function loadState(number) {
+              const result = await github.graphql(pullStateQuery, {
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                number,
+              });
+              const repository = result.repository;
+              const pull = repository?.pullRequest;
+              const defaultBranch = repository?.defaultBranchRef?.name;
+              if (!pull || !defaultBranch) {
+                return null;
+              }
+
+              const labels = await github.paginate(
+                github.rest.issues.listLabelsOnIssue,
+                {
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: number,
+                  per_page: 100,
+                },
+              );
+              const labelNames = new Set(labels.map((label) => label.name));
+              const threadsResolved = await allReviewThreadsResolved(pull.id);
+              const author = pull.author?.login ?? null;
+              const trusted =
+                trustedAuthors.has(author) &&
+                pull.headRepository?.nameWithOwner === repositoryFullName &&
+                pull.baseRepository?.nameWithOwner === repositoryFullName &&
+                pull.baseRefName === defaultBranch;
+              const reviewAllowsMerge =
+                pull.reviewDecision === null ||
+                pull.reviewDecision === "APPROVED";
+              const authorOptedIn =
+                author === "dependabot[bot]" || labelNames.has("automerge");
+              const eligible =
+                trusted &&
+                !pull.isDraft &&
+                authorOptedIn &&
+                pull.mergeable === "MERGEABLE" &&
+                pull.mergeStateStatus === "CLEAN" &&
+                pull.statusCheckRollup?.state === "SUCCESS" &&
+                reviewAllowsMerge &&
+                threadsResolved;
+
+              return {
+                id: pull.id,
+                number,
+                author,
+                headRefOid: pull.headRefOid,
+                trusted,
+                eligible,
+                armed: pull.autoMergeRequest !== null,
+                mergeMethod: pull.autoMergeRequest?.mergeMethod ?? null,
+              };
+            }
+
+            async function disableAutoMerge(pullRequestId) {
+              await github.graphql(
+                `
+                  mutation DisableAutoMerge($pullRequestId: ID!) {
+                    disablePullRequestAutoMerge(
+                      input: { pullRequestId: $pullRequestId }
+                    ) {
+                      pullRequest {
+                        number
+                      }
+                    }
+                  }
+                `,
+                { pullRequestId },
+              );
+            }
+
+            async function enableSquashAutoMerge(
+              pullRequestId,
+              expectedHeadOid,
+            ) {
+              await github.graphql(
+                `
+                  mutation EnableAutoMerge(
+                    $pullRequestId: ID!
+                    $expectedHeadOid: GitObjectID!
+                  ) {
+                    enablePullRequestAutoMerge(
+                      input: {
+                        pullRequestId: $pullRequestId
+                        mergeMethod: SQUASH
+                        expectedHeadOid: $expectedHeadOid
+                      }
+                    ) {
+                      pullRequest {
+                        number
+                      }
+                    }
+                  }
+                `,
+                { pullRequestId, expectedHeadOid },
+              );
+            }
+
+            const openPullRequests = await github.paginate(
+              github.rest.pulls.list,
+              {
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                state: "open",
+                per_page: 100,
+              },
+            );
+
+            let encounteredError = false;
+            for (const summary of openPullRequests) {
+              try {
+                const initial = await loadState(summary.number);
+                if (!initial || !initial.trusted) {
+                  continue;
+                }
+
+                const needsMutation =
+                  (initial.eligible &&
+                    (!initial.armed || initial.mergeMethod !== "SQUASH")) ||
+                  (!initial.eligible && initial.armed);
+                if (!needsMutation) {
+                  continue;
+                }
+
+                const fresh = await loadState(summary.number);
+                if (
+                  !fresh ||
+                  !fresh.trusted ||
+                  fresh.headRefOid !== initial.headRefOid
+                ) {
+                  core.info(
+                    `Skipped PR #${summary.number}: state changed before mutation.`,
+                  );
+                  continue;
+                }
+
+                if (!fresh.eligible) {
+                  if (fresh.armed) {
+                    await disableAutoMerge(fresh.id);
+                    core.info(`Disabled auto-merge for PR #${fresh.number}.`);
+                  }
+                  continue;
+                }
+
+                if (fresh.armed && fresh.mergeMethod === "SQUASH") {
+                  continue;
+                }
+
+                if (fresh.armed) {
+                  await disableAutoMerge(fresh.id);
+                  const afterDisable = await loadState(summary.number);
+                  if (
+                    !afterDisable ||
+                    !afterDisable.trusted ||
+                    !afterDisable.eligible ||
+                    afterDisable.armed ||
+                    afterDisable.headRefOid !== fresh.headRefOid
+                  ) {
+                    core.info(
+                      `Skipped PR #${summary.number}: state changed after disabling the previous merge method.`,
+                    );
+                    continue;
+                  }
+                  await enableSquashAutoMerge(
+                    afterDisable.id,
+                    afterDisable.headRefOid,
+                  );
+                } else {
+                  await enableSquashAutoMerge(fresh.id, fresh.headRefOid);
+                }
+                core.info(
+                  `Enabled squash auto-merge for PR #${fresh.number} as ${fresh.author}.`,
+                );
+              } catch (error) {
+                encounteredError = true;
+                core.error(
+                  `Failed to reconcile PR #${summary.number}: ${error.message}`,
+                );
+              }
+            }
+
+            if (encounteredError) {
+              core.setFailed("One or more pull requests could not be reconciled.");
+            }
