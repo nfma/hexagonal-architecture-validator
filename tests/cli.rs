@@ -123,7 +123,7 @@ fn workspace_shadow_project(name: &str, core_source: &str) -> ScratchProject {
     );
     project.write(
         "domain/src/lib.rs",
-        "pub mod adapter { pub struct Leak; }\n",
+        "pub mod adapter { pub struct Leak; }\npub mod helper {}\n",
     );
     project.write(
         "app/Cargo.toml",
@@ -133,7 +133,7 @@ fn workspace_shadow_project(name: &str, core_source: &str) -> ScratchProject {
     project.write("app/src/core.rs", core_source);
     project.write(
         "hav.toml",
-        "version = 1\n\n[[roles]]\nid = \"core\"\nmodules = [\"::core$\"]\n\n[[roles]]\nid = \"adapter\"\nmodules = [\"^domain::lib.*::adapter$\"]\n\n[[forbidden]]\nid = \"core-no-adapter\"\nfrom = [\"core\"]\nto = [\"adapter\"]\n",
+        "version = 1\n\n[[roles]]\nid = \"core\"\nmodules = [\"::core$\"]\n\n[[roles]]\nid = \"adapter\"\nmodules = [\"^domain::lib.*::(?:adapter|helper)$\"]\n\n[[forbidden]]\nid = \"core-no-adapter\"\nfrom = [\"core\"]\nto = [\"adapter\"]\n",
     );
     project
 }
@@ -506,6 +506,44 @@ fn leading_colon_is_crate_root_relative_in_edition_2015() {
 }
 
 #[test]
+fn leading_colon_standard_crates_are_external_in_edition_2015() {
+    let project = ScratchProject::basic_with_edition(
+        "absolute-std-edition-2015",
+        "2015",
+        "use ::std::collections::HashMap;\npub fn map() -> HashMap<u8, u8> { HashMap::new() }\n",
+        single_role_config(),
+    );
+    let cargo = project.cargo_check();
+    assert!(
+        cargo.status.success(),
+        "edition 2015 standard-library import must compile: {}",
+        String::from_utf8_lossy(&cargo.stderr)
+    );
+    assert_eq!(project.run("text").status.code(), Some(0));
+}
+
+#[test]
+fn local_type_names_take_precedence_over_workspace_crates() {
+    let project = workspace_shadow_project(
+        "workspace-type-shadow",
+        "#[allow(non_camel_case_types)]\npub struct domain;\nimpl domain { pub fn helper() {} }\npub fn call() { domain::helper(); }\n",
+    );
+    let cargo = project.cargo_check();
+    assert!(
+        cargo.status.success(),
+        "local type shadow must compile: {}",
+        String::from_utf8_lossy(&cargo.stderr)
+    );
+    let output = project.run("text");
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "local type must not become a workspace dependency: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+}
+
+#[test]
 fn opaque_reexports_consider_the_intermediate_modules_role() {
     let config = "version = 1\n\n[[roles]]\nid = \"core\"\nmodules = [\"::core(?:$|::)\"]\n\n[[roles]]\nid = \"adapter\"\nmodules = [\"::adapters(?:$|::)\"]\n\n[[forbidden]]\nid = \"core-no-adapter\"\nfrom = [\"core\"]\nto = [\"adapter\"]\n";
     let source = "pub mod adapters { pub mod http { pub use crate::core::model::Order; pub struct Handler; } }\npub mod core { pub mod model { pub struct Order; } pub mod service { use crate::adapters::http::Order; pub fn run(_: Order) {} } }\n";
@@ -527,6 +565,24 @@ fn opaque_reexports_consider_the_intermediate_modules_role() {
     let stdout = String::from_utf8(output.stdout).unwrap();
     assert!(stdout.contains("error[core-no-adapter]"));
     assert!(!stdout.contains("error[opaque-reexport]"));
+}
+
+#[test]
+fn benign_cross_role_reexports_do_not_fail_closed() {
+    let config = "version = 1\n\n[[roles]]\nid = \"application\"\nmodules = [\"::application$\"]\n\n[[roles]]\nid = \"port\"\nmodules = [\"::port$\"]\n\n[[roles]]\nid = \"core\"\nmodules = [\"::core$\"]\n\n[[forbidden]]\nid = \"core-no-application\"\nfrom = [\"core\"]\nto = [\"application\"]\n";
+    let project = ScratchProject::basic(
+        "benign-cross-role-reexport",
+        "pub mod core { pub struct Order; }\npub mod port { pub use crate::core::Order; }\npub mod application { use crate::port::Order; pub fn run(_: Order) {} }\n",
+        config,
+    );
+    assert!(project.rustc().status.success());
+    let output = project.run("text");
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "a route that matches no forbidden rule must pass: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
 }
 
 #[test]

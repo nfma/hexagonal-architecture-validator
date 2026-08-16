@@ -197,6 +197,7 @@ struct Analyzer {
     module_paths: BTreeMap<(String, String), String>,
     module_locations: BTreeMap<String, (String, Vec<String>)>,
     module_items: BTreeMap<(String, String), BTreeSet<String>>,
+    module_type_items: BTreeMap<(String, String), BTreeSet<String>>,
     module_sources: BTreeMap<String, PathBuf>,
     active_sources: BTreeSet<PathBuf>,
 }
@@ -245,6 +246,7 @@ pub fn analyze(options: AnalysisOptions<'_>) -> anyhow::Result<DependencyGraph> 
         module_paths: BTreeMap::new(),
         module_locations: BTreeMap::new(),
         module_items: BTreeMap::new(),
+        module_type_items: BTreeMap::new(),
         module_sources: BTreeMap::new(),
         active_sources: BTreeSet::new(),
     };
@@ -611,11 +613,20 @@ impl Analyzer {
     }
 
     fn register_items(&mut self, target: &TargetInfo, segments: &[String], items: &[Item]) {
+        let location = (target.root_id.clone(), segments.join("::"));
         let names = items.iter().filter_map(item_name).collect::<BTreeSet<_>>();
         self.module_items
-            .entry((target.root_id.clone(), segments.join("::")))
+            .entry(location.clone())
             .or_default()
             .extend(names);
+        let type_names = items
+            .iter()
+            .filter_map(type_item_name)
+            .collect::<BTreeSet<_>>();
+        self.module_type_items
+            .entry(location)
+            .or_default()
+            .extend(type_names);
     }
 
     fn resolve_dependencies(&mut self) {
@@ -773,13 +784,29 @@ impl Analyzer {
         let first = segments[0].as_str();
         if raw.leading_colon {
             if target.edition == Edition::E2015 {
-                return self.resolve_candidate(
+                let crate_root_resolution = self.resolve_candidate(
                     &raw.target_root,
                     segments,
                     imports,
                     &raw.evidence.expression,
                     &target.name,
                 );
+                if !matches!(&crate_root_resolution, Resolution::Unresolved(_)) {
+                    return crate_root_resolution;
+                }
+                if let Some(workspace_root) = target.workspace_aliases.get(first) {
+                    return self.resolve_candidate(
+                        workspace_root,
+                        &segments[1..],
+                        imports,
+                        &raw.evidence.expression,
+                        &target.name,
+                    );
+                }
+                if target.external_aliases.contains(first) || STANDARD_CRATES.contains(&first) {
+                    return Resolution::External;
+                }
+                return crate_root_resolution;
             }
             if let Some(workspace_root) = target.workspace_aliases.get(first) {
                 return self.resolve_candidate(
@@ -817,7 +844,11 @@ impl Analyzer {
             let local_module_exists = self
                 .module_paths
                 .contains_key(&(raw.target_root.clone(), local_module.join("::")));
-            if !crate_alias_takes_precedence || local_module_exists {
+            let local_type_item_exists = self
+                .module_type_items
+                .get(&(raw.target_root.clone(), raw.current_segments.join("::")))
+                .is_some_and(|items| items.contains(first));
+            if !crate_alias_takes_precedence || local_module_exists || local_type_item_exists {
                 let local_resolution = self.resolve_candidate(
                     &raw.target_root,
                     &local_candidate,
@@ -1366,6 +1397,18 @@ fn item_name(item: &Item) -> Option<String> {
         Item::Macro(item) => item.ident.as_ref().map(ToString::to_string),
         Item::Mod(item) => Some(item.ident.to_string()),
         Item::Static(item) => Some(item.ident.to_string()),
+        Item::Struct(item) => Some(item.ident.to_string()),
+        Item::Trait(item) => Some(item.ident.to_string()),
+        Item::TraitAlias(item) => Some(item.ident.to_string()),
+        Item::Type(item) => Some(item.ident.to_string()),
+        Item::Union(item) => Some(item.ident.to_string()),
+        _ => None,
+    }
+}
+
+fn type_item_name(item: &Item) -> Option<String> {
+    match item {
+        Item::Enum(item) => Some(item.ident.to_string()),
         Item::Struct(item) => Some(item.ident.to_string()),
         Item::Trait(item) => Some(item.ident.to_string()),
         Item::TraitAlias(item) => Some(item.ident.to_string()),

@@ -27,9 +27,14 @@ fn validate_smoke_step(workflow: &str) -> Result<(), String> {
         .split_once("        run: |\n")
         .map(|(_, run)| run)
         .ok_or_else(|| "smoke step must use a shell run block".to_owned())?;
+    let uses_fail_fast_shell = smoke.lines().any(|line| line.trim() == "shell: bash");
+    let sets_fail_fast_options = run.lines().any(|line| line.trim() == "set -euo pipefail");
+    if !uses_fail_fast_shell && !sets_fail_fast_options {
+        return Err("smoke step must use a fail-fast shell".to_owned());
+    }
     if run.lines().any(|line| {
         let command = line.trim();
-        command == "set +e" || command.contains("|| true")
+        matches!(command, "set +e" | "set +o errexit") || command.contains("|| true")
     }) {
         return Err("smoke commands must fail closed".to_owned());
     }
@@ -108,6 +113,22 @@ fn release_smoke_validation_rejects_fail_open_mutations() {
                 &workflow,
                 "        run: |",
                 "        run: |\n          set +e",
+            ),
+        ),
+        (
+            "disabled errexit option",
+            mutate_smoke_step(
+                &workflow,
+                "        run: |",
+                "        run: |\n          set +o errexit",
+            ),
+        ),
+        (
+            "custom bash shell without fail-fast flags",
+            mutate_smoke_step(
+                &workflow,
+                "        shell: bash",
+                "        shell: bash --noprofile --norc {0}",
             ),
         ),
         (

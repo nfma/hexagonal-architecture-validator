@@ -158,11 +158,10 @@ fn record_opaque_reexports(
                 .iter()
                 .any(|rule| rule.matches(source_roles, via_roles))
         });
-        if source_roles != target_roles
-            || config
-                .forbidden
-                .iter()
-                .any(|rule| rule.matches(source_roles, target_roles))
+        if config
+            .forbidden
+            .iter()
+            .any(|rule| rule.matches(source_roles, target_roles))
             || crosses_forbidden_via
         {
             graph.diagnostics.insert(AnalysisDiagnostic {
