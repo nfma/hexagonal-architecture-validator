@@ -4,7 +4,7 @@
 It discovers Cargo workspace targets and Rust modules, builds a normalized static
 dependency graph, then evaluates explicit role-based rules. The built-in
 hexagonal preset catches dependencies from core, application, or port code to
-concrete adapters and keeps composition-root wiring explicit.
+concrete adapters and keeps narrow exceptions explicit and auditable.
 
 The result is architecture evidence, not a claim that folder names or static
 dependencies prove architectural quality.
@@ -36,9 +36,10 @@ Exit codes are part of the CLI contract:
 ## Configuration
 
 Configuration is explicit and versioned. Roles map module IDs or normalized
-workspace-relative source paths to architectural intent. Forbidden rules match
-dependencies by source and target roles. Allowed rules are named, explicit
-exceptions evaluated before forbidden rules.
+workspace-relative source paths to architectural intent. Every role must match
+at least one module. Forbidden rules match dependencies by source and target
+roles. Allowed rules must name the exact forbidden IDs they exempt, and every
+applied exemption appears in JSON and text reports.
 
 ```toml
 version = 1
@@ -68,9 +69,13 @@ inline modules, and resolves local plus workspace-crate imports. Findings,
 paths, modules, edges, and diagnostics are sorted deterministically.
 
 Macro expansion and cfg evaluation are deliberately outside the first release.
-`include!` is an analysis error; `--strict` also makes item-position macro
-invocations analysis errors. All reports list the remaining false-positive and
-false-negative risks. See [Analysis and limitations](docs/ANALYSIS.md).
+Strict analysis defaults on; `strict = false` is the explicit opt-out for
+unsupported item-position macros. Bare and qualified `include!` forms always
+fail analysis. Repeated cfg declarations coalesce only when they resolve to the
+same canonical file, and module sources cannot escape the Cargo workspace via
+absolute paths, traversal, or symlinks. All reports list the remaining
+false-positive and false-negative risks. See
+[Analysis and limitations](docs/ANALYSIS.md).
 
 ## Development
 

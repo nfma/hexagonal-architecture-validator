@@ -7,9 +7,14 @@ use cargo_metadata::{MetadataCommand, Package, Target};
 use proc_macro2::Span;
 use syn::spanned::Spanned;
 use syn::visit::{self, Visit};
-use syn::{Attribute, Item, ItemExternCrate, ItemMacro, ItemUse, Macro, Path as SynPath, UseTree};
+use syn::{
+    Attribute, Item, ItemExternCrate, ItemMacro, ItemUse, Macro, Path as SynPath, UseTree,
+    Visibility,
+};
 
-use crate::model::{AnalysisDiagnostic, Dependency, DependencyGraph, Evidence, Module};
+use crate::model::{
+    AnalysisDiagnostic, Dependency, DependencyGraph, Evidence, Module, OpaqueReexport,
+};
 
 const STANDARD_CRATES: [&str; 5] = ["alloc", "core", "proc_macro", "std", "test"];
 
@@ -42,7 +47,14 @@ struct RawDependency {
     current_segments: Vec<String>,
     segments: Vec<String>,
     origin: DependencyOrigin,
+    reexported_name: Option<String>,
     evidence: Evidence,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+struct UseImport {
+    segments: Vec<String>,
+    exposed_name: String,
 }
 
 struct Analyzer {
@@ -53,7 +65,8 @@ struct Analyzer {
     raw_dependencies: Vec<RawDependency>,
     module_paths: BTreeMap<(String, String), String>,
     module_items: BTreeMap<(String, String), BTreeSet<String>>,
-    visited_modules: BTreeSet<String>,
+    module_sources: BTreeMap<String, PathBuf>,
+    active_sources: BTreeSet<PathBuf>,
 }
 
 pub fn analyze(options: AnalysisOptions<'_>) -> anyhow::Result<DependencyGraph> {
@@ -78,7 +91,12 @@ pub fn analyze(options: AnalysisOptions<'_>) -> anyhow::Result<DependencyGraph> 
     let metadata = command
         .exec()
         .context("cargo metadata failed in offline mode")?;
-    let workspace_root = metadata.workspace_root.clone().into_std_path_buf();
+    let workspace_root = metadata
+        .workspace_root
+        .clone()
+        .into_std_path_buf()
+        .canonicalize()
+        .context("Cargo workspace root could not be canonicalized")?;
     let targets = build_targets(&metadata.packages)?;
     if targets.is_empty() {
         bail!("Cargo workspace has no analyzable Rust targets");
@@ -95,7 +113,8 @@ pub fn analyze(options: AnalysisOptions<'_>) -> anyhow::Result<DependencyGraph> 
         raw_dependencies: Vec::new(),
         module_paths: BTreeMap::new(),
         module_items: BTreeMap::new(),
-        visited_modules: BTreeSet::new(),
+        module_sources: BTreeMap::new(),
+        active_sources: BTreeSet::new(),
     };
 
     let targets = analyzer.targets.values().cloned().collect::<Vec<_>>();
@@ -105,7 +124,14 @@ pub fn analyze(options: AnalysisOptions<'_>) -> anyhow::Result<DependencyGraph> 
             .parent()
             .context("Cargo target source has no parent directory")?
             .to_path_buf();
-        analyzer.discover_file_module(&target, Vec::new(), &target.source, &module_dir)?;
+        analyzer.discover_file_module(
+            &target,
+            Vec::new(),
+            &target.source,
+            &module_dir,
+            None,
+            None,
+        )?;
     }
     analyzer.resolve_dependencies();
 
@@ -152,7 +178,7 @@ fn build_targets(packages: &[Package]) -> anyhow::Result<Vec<TargetInfo>> {
             targets
                 .iter()
                 .find(|(_, _, _, is_library)| *is_library)
-                .map(|(_, root, _, _)| (package.clone(), root.clone()))
+                .map(|(name, root, _, _)| (package.clone(), (name.clone(), root.clone())))
         })
         .collect::<BTreeMap<_, _>>();
 
@@ -165,21 +191,25 @@ fn build_targets(packages: &[Package]) -> anyhow::Result<Vec<TargetInfo>> {
             let mut workspace_aliases = BTreeMap::new();
             let mut external_aliases = BTreeSet::new();
             for dependency in dependencies {
-                let alias = dependency
-                    .rename
-                    .as_deref()
-                    .unwrap_or(dependency.name.as_str())
-                    .replace('-', "_");
-                if let Some(root) = library_roots.get(dependency.name.as_str()) {
+                if let Some((library_name, root)) = library_roots.get(dependency.name.as_str()) {
+                    let alias = dependency
+                        .rename
+                        .as_deref()
+                        .unwrap_or(library_name)
+                        .replace('-', "_");
                     workspace_aliases.insert(alias, root.clone());
                 } else {
+                    let alias = dependency
+                        .rename
+                        .as_deref()
+                        .unwrap_or(dependency.name.as_str())
+                        .replace('-', "_");
                     external_aliases.insert(alias);
                 }
             }
             if !is_library {
-                if let Some(library_root) = library_roots.get(package) {
-                    let library_name = package.replace('-', "_");
-                    workspace_aliases.insert(library_name, library_root.clone());
+                if let Some((library_name, library_root)) = library_roots.get(package) {
+                    workspace_aliases.insert(library_name.replace('-', "_"), library_root.clone());
                 }
             }
 
@@ -227,27 +257,73 @@ impl Analyzer {
         segments: Vec<String>,
         source: &Path,
         module_dir: &Path,
+        declaring_source: Option<&Path>,
+        declaration_line: Option<usize>,
     ) -> anyhow::Result<()> {
         let module_id = module_id(&target.root_id, &segments);
-        if !self.visited_modules.insert(module_id.clone()) {
+        let canonical_source = match source.canonicalize() {
+            Ok(source) => source,
+            Err(error) => {
+                self.add_diagnostic(
+                    "source-read-failed",
+                    format!("could not canonicalize Rust source: {error}"),
+                    declaring_source.or(Some(source)),
+                    declaration_line,
+                );
+                return Ok(());
+            }
+        };
+        if !canonical_source.starts_with(&self.workspace_root) {
             self.add_diagnostic(
-                "duplicate-module",
-                format!("module '{module_id}' was discovered more than once"),
-                Some(source),
-                None,
+                "module-outside-workspace",
+                format!("module '{module_id}' resolves outside the Cargo workspace"),
+                declaring_source.or(Some(source)),
+                declaration_line,
             );
             return Ok(());
         }
+        if self.active_sources.contains(&canonical_source) {
+            self.add_diagnostic(
+                "recursive-module-source",
+                format!(
+                    "module '{module_id}' recursively resolves to active source '{}'",
+                    self.normalize_path(&canonical_source)
+                ),
+                declaring_source.or(Some(source)),
+                declaration_line,
+            );
+            return Ok(());
+        }
+        if let Some(existing) = self.module_sources.get(&module_id) {
+            if existing == &canonical_source {
+                return Ok(());
+            }
+            self.add_diagnostic(
+                "cfg-ambiguous-module",
+                format!(
+                    "module '{module_id}' resolves to both '{}' and '{}' across syntactic branches",
+                    self.normalize_path(existing),
+                    self.normalize_path(&canonical_source)
+                ),
+                declaring_source.or(Some(source)),
+                declaration_line,
+            );
+            return Ok(());
+        }
+        self.module_sources
+            .insert(module_id.clone(), canonical_source.clone());
+        self.active_sources.insert(canonical_source.clone());
 
-        let contents = match fs::read_to_string(source) {
+        let contents = match fs::read_to_string(&canonical_source) {
             Ok(contents) => contents,
             Err(error) => {
                 self.add_diagnostic(
                     "source-read-failed",
                     format!("could not read Rust source: {error}"),
-                    Some(source),
+                    Some(&canonical_source),
                     None,
                 );
+                self.active_sources.remove(&canonical_source);
                 return Ok(());
             }
         };
@@ -257,22 +333,25 @@ impl Analyzer {
                 self.add_diagnostic(
                     "parse-failed",
                     error.to_string(),
-                    Some(source),
+                    Some(&canonical_source),
                     Some(error.span().start().line),
                 );
+                self.active_sources.remove(&canonical_source);
                 return Ok(());
             }
         };
 
-        self.register_module(target, &segments, source);
-        self.inspect_items(
+        self.register_module(target, &segments, &canonical_source);
+        let result = self.inspect_items(
             target,
             &module_id,
             &segments,
-            source,
+            &canonical_source,
             module_dir,
             &file.items,
-        )
+        );
+        self.active_sources.remove(&canonical_source);
+        result
     }
 
     fn inspect_items(
@@ -308,15 +387,23 @@ impl Analyzer {
             child_segments.push(child_name.clone());
             if let Some((_, inline_items)) = &item_mod.content {
                 let child_id = module_id(&target.root_id, &child_segments);
-                if !self.visited_modules.insert(child_id.clone()) {
+                let canonical_source = source
+                    .canonicalize()
+                    .expect("discovered source was already canonicalized");
+                if let Some(existing) = self.module_sources.get(&child_id) {
+                    if existing == &canonical_source {
+                        continue;
+                    }
                     self.add_diagnostic(
-                        "duplicate-module",
-                        format!("module '{child_id}' was discovered more than once"),
+                        "cfg-ambiguous-module",
+                        format!("inline module '{child_id}' has ambiguous sources"),
                         Some(source),
                         Some(item_mod.span().start().line),
                     );
                     continue;
                 }
+                self.module_sources
+                    .insert(child_id.clone(), canonical_source);
                 self.register_module(target, &child_segments, source);
                 let child_dir = module_dir.join(&child_name);
                 self.inspect_items(
@@ -333,7 +420,14 @@ impl Analyzer {
             let line = item_mod.span().start().line;
             match resolve_module_file(source, module_dir, &child_name, &item_mod.attrs) {
                 Ok((child_source, child_dir)) => {
-                    self.discover_file_module(target, child_segments, &child_source, &child_dir)?;
+                    self.discover_file_module(
+                        target,
+                        child_segments,
+                        &child_source,
+                        &child_dir,
+                        Some(source),
+                        Some(line),
+                    )?;
                 }
                 Err(message) => {
                     self.add_diagnostic("unresolved-module", message, Some(source), Some(line))
@@ -362,9 +456,19 @@ impl Analyzer {
     }
 
     fn register_items(&mut self, target: &TargetInfo, segments: &[String], items: &[Item]) {
-        let names = items.iter().filter_map(item_name).collect::<BTreeSet<_>>();
+        let mut names = items.iter().filter_map(item_name).collect::<BTreeSet<_>>();
+        for item_use in items.iter().filter_map(|item| match item {
+            Item::Use(item_use) => Some(item_use),
+            _ => None,
+        }) {
+            for import in flatten_item_use(item_use) {
+                names.insert(import.exposed_name);
+            }
+        }
         self.module_items
-            .insert((target.root_id.clone(), segments.join("::")), names);
+            .entry((target.root_id.clone(), segments.join("::")))
+            .or_default()
+            .extend(names);
     }
 
     fn resolve_dependencies(&mut self) {
@@ -383,34 +487,84 @@ impl Analyzer {
                 ))
         });
         let mut dependencies = BTreeMap::<(String, String), Dependency>::new();
+        let mut reexports = BTreeMap::<(String, String), BTreeSet<String>>::new();
         let raw_dependencies = std::mem::take(&mut self.raw_dependencies);
-        for raw in raw_dependencies {
-            match self.resolve_dependency(&raw) {
+        for raw in raw_dependencies
+            .iter()
+            .filter(|raw| raw.reexported_name.is_some())
+        {
+            match self.resolve_dependency(raw, &BTreeMap::new()) {
+                Resolution::Module(target) if target != raw.source => {
+                    reexports
+                        .entry((
+                            raw.source.clone(),
+                            raw.reexported_name.clone().expect("re-export was filtered"),
+                        ))
+                        .or_default()
+                        .insert(target.clone());
+                    dependencies
+                        .entry((raw.source.clone(), target.clone()))
+                        .or_insert(Dependency {
+                            source: raw.source.clone(),
+                            target,
+                            evidence: raw.evidence.clone(),
+                        });
+                }
+                Resolution::Module(_) | Resolution::External | Resolution::LocalItem => {}
+                Resolution::Opaque { .. } => unreachable!("re-export map starts empty"),
+                Resolution::Unresolved(message) => self.record_unresolved(raw, message),
+            }
+        }
+        for raw in raw_dependencies
+            .iter()
+            .filter(|raw| raw.reexported_name.is_none())
+        {
+            match self.resolve_dependency(raw, &reexports) {
                 Resolution::Module(target) if target != raw.source => {
                     dependencies
                         .entry((raw.source.clone(), target.clone()))
                         .or_insert(Dependency {
-                            source: raw.source,
+                            source: raw.source.clone(),
                             target,
-                            evidence: raw.evidence,
+                            evidence: raw.evidence.clone(),
                         });
                 }
-                Resolution::Module(_) | Resolution::External | Resolution::LocalItem => {}
-                Resolution::Unresolved(message) if raw.origin == DependencyOrigin::Use => {
-                    self.graph.diagnostics.insert(AnalysisDiagnostic {
-                        code: "unresolved-import".to_owned(),
-                        message,
-                        path: Some(raw.evidence.path),
-                        line: Some(raw.evidence.line),
-                    });
+                Resolution::Opaque {
+                    targets,
+                    via,
+                    exported_name,
+                } => {
+                    for target in targets {
+                        self.graph.opaque_reexports.insert(OpaqueReexport {
+                            source: raw.source.clone(),
+                            target,
+                            via: via.clone(),
+                            exported_name: exported_name.clone(),
+                            evidence: raw.evidence.clone(),
+                        });
+                    }
                 }
-                Resolution::Unresolved(_) => {}
+                Resolution::Module(_) | Resolution::External | Resolution::LocalItem => {}
+                Resolution::Unresolved(message) => self.record_unresolved(raw, message),
             }
         }
         self.graph.dependencies = dependencies.into_values().collect();
     }
 
-    fn resolve_dependency(&self, raw: &RawDependency) -> Resolution {
+    fn record_unresolved(&mut self, raw: &RawDependency, message: String) {
+        self.graph.diagnostics.insert(AnalysisDiagnostic {
+            code: "unresolved-import".to_owned(),
+            message,
+            path: Some(raw.evidence.path.clone()),
+            line: Some(raw.evidence.line),
+        });
+    }
+
+    fn resolve_dependency(
+        &self,
+        raw: &RawDependency,
+        reexports: &BTreeMap<(String, String), BTreeSet<String>>,
+    ) -> Resolution {
         if raw.segments.is_empty() {
             return Resolution::LocalItem;
         }
@@ -455,6 +609,9 @@ impl Analyzer {
             first => {
                 let top_level_key = (raw.target_root.clone(), first.to_owned());
                 if !self.module_paths.contains_key(&top_level_key) {
+                    if raw.origin == DependencyOrigin::Path {
+                        return Resolution::LocalItem;
+                    }
                     if self
                         .module_items
                         .get(&(raw.target_root.clone(), String::new()))
@@ -473,12 +630,48 @@ impl Analyzer {
 
         for length in (0..=candidate.len()).rev() {
             let relative = candidate[..length].join("::");
-            if let Some(module) = self.module_paths.get(&(target_root.to_owned(), relative)) {
-                return Resolution::Module(module.clone());
+            if let Some(module) = self
+                .module_paths
+                .get(&(target_root.to_owned(), relative.clone()))
+            {
+                let remaining = &candidate[length..];
+                if remaining.is_empty() {
+                    return Resolution::Module(module.clone());
+                }
+                let exposed_name = &remaining[0];
+                if let Some(targets) = reexports.get(&(module.clone(), exposed_name.clone())) {
+                    return Resolution::Opaque {
+                        targets: targets.iter().cloned().collect(),
+                        via: module.clone(),
+                        exported_name: exposed_name.clone(),
+                    };
+                }
+                if let Some(targets) = reexports.get(&(module.clone(), "*".to_owned())) {
+                    return Resolution::Opaque {
+                        targets: targets.iter().cloned().collect(),
+                        via: module.clone(),
+                        exported_name: "*".to_owned(),
+                    };
+                }
+                if self
+                    .module_items
+                    .get(&(target_root.to_owned(), relative))
+                    .is_some_and(|items| items.contains(exposed_name))
+                {
+                    return Resolution::Module(module.clone());
+                }
+                return Resolution::Unresolved(format!(
+                    "could not resolve '{}' after module '{}'",
+                    remaining.join("::"),
+                    module
+                ));
             }
         }
 
-        Resolution::LocalItem
+        Resolution::Unresolved(format!(
+            "could not resolve '{}' in target '{}'",
+            raw.evidence.expression, target.name
+        ))
     }
 
     fn add_diagnostic(
@@ -507,6 +700,11 @@ impl Analyzer {
 
 enum Resolution {
     Module(String),
+    Opaque {
+        targets: Vec<String>,
+        via: String,
+        exported_name: String,
+    },
     External,
     LocalItem,
     Unresolved(String),
@@ -541,7 +739,13 @@ impl<'a> DependencyVisitor<'a> {
         }
     }
 
-    fn push_dependency(&mut self, segments: Vec<String>, origin: DependencyOrigin, span: Span) {
+    fn push_dependency(
+        &mut self,
+        segments: Vec<String>,
+        origin: DependencyOrigin,
+        reexported_name: Option<String>,
+        span: Span,
+    ) {
         if segments.is_empty() {
             return;
         }
@@ -556,6 +760,7 @@ impl<'a> DependencyVisitor<'a> {
             },
             segments,
             origin,
+            reexported_name,
         });
     }
 
@@ -576,10 +781,15 @@ impl<'ast> Visit<'ast> for DependencyVisitor<'_> {
     fn visit_item_mod(&mut self, _node: &'ast syn::ItemMod) {}
 
     fn visit_item_use(&mut self, node: &'ast ItemUse) {
-        let mut paths = Vec::new();
-        flatten_use_tree(&node.tree, Vec::new(), &mut paths);
-        for path in paths {
-            self.push_dependency(path, DependencyOrigin::Use, node.span());
+        let is_reexport = !matches!(node.vis, Visibility::Inherited);
+        for import in flatten_item_use(node) {
+            let reexported_name = is_reexport.then_some(import.exposed_name);
+            self.push_dependency(
+                import.segments,
+                DependencyOrigin::Use,
+                reexported_name,
+                node.span(),
+            );
         }
     }
 
@@ -587,6 +797,7 @@ impl<'ast> Visit<'ast> for DependencyVisitor<'_> {
         self.push_dependency(
             vec![node.ident.to_string()],
             DependencyOrigin::Use,
+            None,
             node.span(),
         );
     }
@@ -598,14 +809,14 @@ impl<'ast> Visit<'ast> for DependencyVisitor<'_> {
                 .first()
                 .is_some_and(|segment| matches!(segment.as_str(), "crate" | "self" | "super"))
         {
-            self.push_dependency(segments, DependencyOrigin::Path, node.span());
+            self.push_dependency(segments, DependencyOrigin::Path, None, node.span());
         }
         visit::visit_path(self, node);
     }
 
     fn visit_item_macro(&mut self, node: &'ast ItemMacro) {
-        let name = path_segments(&node.mac.path).join("::");
-        if name == "include" {
+        let segments = path_segments(&node.mac.path);
+        if segments.last().is_some_and(|name| name == "include") {
             self.record_unsupported_macro(&node.mac, "unsupported-include");
         } else if self.strict {
             self.record_unsupported_macro(&node.mac, "unsupported-item-macro");
@@ -613,36 +824,58 @@ impl<'ast> Visit<'ast> for DependencyVisitor<'_> {
     }
 
     fn visit_macro(&mut self, node: &'ast Macro) {
-        if path_segments(&node.path).join("::") == "include" {
+        if path_segments(&node.path)
+            .last()
+            .is_some_and(|name| name == "include")
+        {
             self.record_unsupported_macro(node, "unsupported-include");
         }
         visit::visit_macro(self, node);
     }
 }
 
-fn flatten_use_tree(tree: &UseTree, prefix: Vec<String>, paths: &mut Vec<Vec<String>>) {
+fn flatten_item_use(item_use: &ItemUse) -> Vec<UseImport> {
+    let mut imports = Vec::new();
+    flatten_use_tree(&item_use.tree, Vec::new(), &mut imports);
+    imports
+}
+
+fn flatten_use_tree(tree: &UseTree, prefix: Vec<String>, imports: &mut Vec<UseImport>) {
     match tree {
         UseTree::Path(path) => {
             let mut next = prefix;
             next.push(path.ident.to_string());
-            flatten_use_tree(&path.tree, next, paths);
+            flatten_use_tree(&path.tree, next, imports);
         }
         UseTree::Name(name) => {
             let mut path = prefix;
             if name.ident != "self" {
                 path.push(name.ident.to_string());
             }
-            paths.push(path);
+            let exposed_name = path
+                .last()
+                .cloned()
+                .expect("a use name has an exposed identifier");
+            imports.push(UseImport {
+                segments: path,
+                exposed_name,
+            });
         }
         UseTree::Rename(rename) => {
             let mut path = prefix;
             path.push(rename.ident.to_string());
-            paths.push(path);
+            imports.push(UseImport {
+                segments: path,
+                exposed_name: rename.rename.to_string(),
+            });
         }
-        UseTree::Glob(_) => paths.push(prefix),
+        UseTree::Glob(_) => imports.push(UseImport {
+            segments: prefix,
+            exposed_name: "*".to_owned(),
+        }),
         UseTree::Group(group) => {
             for item in &group.items {
-                flatten_use_tree(item, prefix.clone(), paths);
+                flatten_use_tree(item, prefix.clone(), imports);
             }
         }
     }
@@ -694,10 +927,7 @@ fn resolve_module_file(
                 custom_path.display()
             ));
         }
-        let child_dir = source
-            .parent()
-            .unwrap_or(module_dir)
-            .join(source.file_stem().unwrap_or_default());
+        let child_dir = source.parent().unwrap_or(module_dir).to_path_buf();
         return Ok((source, child_dir));
     }
 
@@ -792,14 +1022,22 @@ mod tests {
     #[test]
     fn flattens_grouped_use_trees() {
         let item: ItemUse = syn::parse_str("use crate::a::{self, B, c::*};").unwrap();
-        let mut paths = Vec::new();
-        flatten_use_tree(&item.tree, Vec::new(), &mut paths);
+        let imports = flatten_item_use(&item);
         assert_eq!(
-            paths,
+            imports,
             vec![
-                vec!["crate", "a"],
-                vec!["crate", "a", "B"],
-                vec!["crate", "a", "c"],
+                UseImport {
+                    segments: vec!["crate".to_owned(), "a".to_owned()],
+                    exposed_name: "a".to_owned(),
+                },
+                UseImport {
+                    segments: vec!["crate".to_owned(), "a".to_owned(), "B".to_owned()],
+                    exposed_name: "B".to_owned(),
+                },
+                UseImport {
+                    segments: vec!["crate".to_owned(), "a".to_owned(), "c".to_owned()],
+                    exposed_name: "*".to_owned(),
+                },
             ]
         );
     }

@@ -7,3 +7,7 @@ mod core {
         let _ = console;
     }
 }
+
+mod application {}
+mod composition_root {}
+mod port {}

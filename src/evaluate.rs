@@ -1,16 +1,20 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::config::{LoadedConfig, classify_modules};
-use crate::model::{DependencyGraph, Finding, FindingKind, Outcome, Summary, ValidationReport};
+use crate::model::{
+    AnalysisDiagnostic, AppliedExemption, DependencyGraph, Finding, FindingKind, Outcome, Summary,
+    ValidationReport,
+};
 
-const LIMITATIONS: [&str; 4] = [
-    "cfg predicates are not evaluated; all syntactically present branches are analyzed",
+const LIMITATIONS: [&str; 5] = [
+    "cfg predicates are not evaluated; same-file declarations coalesce and differing files fail analysis",
     "procedural and declarative macros are not expanded",
+    "cross-role dependencies through public re-exports fail closed; the full pub-use graph is not followed",
     "method calls, dynamic dispatch, and runtime relationships do not create dependency edges",
     "a passing result is evidence for declared static boundaries, not proof of architectural quality",
 ];
 
-pub fn evaluate(graph: DependencyGraph, config: &LoadedConfig) -> ValidationReport {
+pub fn evaluate(mut graph: DependencyGraph, config: &LoadedConfig) -> ValidationReport {
     let classifications = classify_modules(
         config,
         graph.modules.values().map(|module| {
@@ -21,7 +25,9 @@ pub fn evaluate(graph: DependencyGraph, config: &LoadedConfig) -> ValidationRepo
             )
         }),
     );
-    let mut findings = evaluate_rules(&graph, config, &classifications);
+    record_unmatched_roles(&mut graph, config, &classifications);
+    record_opaque_reexports(&mut graph, &classifications);
+    let (mut findings, exemptions) = evaluate_rules(&graph, config, &classifications);
     if config.analysis.detect_cycles {
         findings.extend(cycle_findings(&graph));
     }
@@ -42,6 +48,7 @@ pub fn evaluate(graph: DependencyGraph, config: &LoadedConfig) -> ValidationRepo
         dependencies: dependencies.len(),
         violations: findings.len(),
         analysis_errors: analysis_errors.len(),
+        exemptions: exemptions.len(),
     };
 
     ValidationReport {
@@ -52,6 +59,7 @@ pub fn evaluate(graph: DependencyGraph, config: &LoadedConfig) -> ValidationRepo
         modules,
         dependencies,
         findings,
+        exemptions,
         analysis_errors,
         limitations: LIMITATIONS.to_vec(),
     }
@@ -61,8 +69,9 @@ fn evaluate_rules(
     graph: &DependencyGraph,
     config: &LoadedConfig,
     classifications: &BTreeMap<String, BTreeSet<String>>,
-) -> Vec<Finding> {
+) -> (Vec<Finding>, Vec<AppliedExemption>) {
     let mut findings = Vec::new();
+    let mut exemptions = BTreeSet::new();
     for dependency in &graph.dependencies {
         let source_roles = classifications
             .get(&dependency.source)
@@ -71,18 +80,28 @@ fn evaluate_rules(
             .get(&dependency.target)
             .expect("all graph modules were classified");
 
-        if config
-            .allowed
-            .iter()
-            .any(|rule| rule.matches(source_roles, target_roles))
-        {
-            continue;
-        }
         for rule in config
             .forbidden
             .iter()
             .filter(|rule| rule.matches(source_roles, target_roles))
         {
+            let matching_exemptions = config.allowed.iter().filter(|allowed| {
+                allowed.exempts.contains(&rule.id) && allowed.matches(source_roles, target_roles)
+            });
+            let mut exempted = false;
+            for allowed in matching_exemptions {
+                exempted = true;
+                exemptions.insert(AppliedExemption {
+                    allowed_rule_id: allowed.id.clone(),
+                    forbidden_rule_id: rule.id.clone(),
+                    source: dependency.source.clone(),
+                    target: dependency.target.clone(),
+                    evidence: dependency.evidence.clone(),
+                });
+            }
+            if exempted {
+                continue;
+            }
             let rationale = rule
                 .description
                 .as_deref()
@@ -98,7 +117,52 @@ fn evaluate_rules(
             });
         }
     }
-    findings
+    (findings, exemptions.into_iter().collect())
+}
+
+fn record_unmatched_roles(
+    graph: &mut DependencyGraph,
+    config: &LoadedConfig,
+    classifications: &BTreeMap<String, BTreeSet<String>>,
+) {
+    for role in &config.roles {
+        if classifications
+            .values()
+            .all(|roles| !roles.contains(&role.id))
+        {
+            graph.diagnostics.insert(AnalysisDiagnostic {
+                code: "role-matched-no-modules".to_owned(),
+                message: format!("declared role '{}' matched no discovered modules", role.id),
+                path: None,
+                line: None,
+            });
+        }
+    }
+}
+
+fn record_opaque_reexports(
+    graph: &mut DependencyGraph,
+    classifications: &BTreeMap<String, BTreeSet<String>>,
+) {
+    for reexport in &graph.opaque_reexports {
+        let source_roles = classifications
+            .get(&reexport.source)
+            .expect("opaque re-export source was classified");
+        let target_roles = classifications
+            .get(&reexport.target)
+            .expect("opaque re-export target was classified");
+        if source_roles != target_roles {
+            graph.diagnostics.insert(AnalysisDiagnostic {
+                code: "opaque-reexport".to_owned(),
+                message: format!(
+                    "dependency '{}' crosses a role boundary through re-export '{}' in '{}'; v0.1 does not follow the full pub-use graph",
+                    reexport.evidence.expression, reexport.exported_name, reexport.via
+                ),
+                path: Some(reexport.evidence.path.clone()),
+                line: Some(reexport.evidence.line),
+            });
+        }
+    }
 }
 
 fn cycle_findings(graph: &DependencyGraph) -> Vec<Finding> {

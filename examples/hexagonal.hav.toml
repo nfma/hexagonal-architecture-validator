@@ -32,10 +32,11 @@ id = "composition-root"
 description = "Narrow application wiring and startup boundary"
 paths = ["^src/main\\.rs$", "^src/bin/[^/]+\\.rs$"]
 
-# Allowed rules are explicit exceptions. This records that only the narrowly
-# classified composition root may wire concrete adapters.
+# Allowed rules are explicit, narrow exceptions to named forbidden rules. This
+# example permits one adapter boundary to reference composition-root wiring.
 [[allowed]]
-id = "composition-root-wiring"
-description = "The composition root may assemble the application"
-from = ["composition-root"]
-to = ["core", "application", "port", "adapter"]
+id = "adapter-startup-hook"
+description = "Adapters may invoke the narrow composition-root startup hook"
+from = ["adapter"]
+to = ["composition-root"]
+exempts = ["adapters-must-not-depend-on-composition-root"]
