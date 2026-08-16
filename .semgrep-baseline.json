@@ -1,0 +1,102 @@
+{
+  "schemaVersion": 1,
+  "semgrepVersion": "1.173.0",
+  "errors": [
+    {
+      "code": 3,
+      "level": "warn",
+      "type": "PartialParsing",
+      "path": ".github/workflows/ci.yml",
+      "start": {
+        "line": 38,
+        "column": 21
+      },
+      "end": {
+        "line": 38,
+        "column": 24
+      },
+      "message": "Syntax error at line .github/workflows/ci.yml:38:\n When parsing a snippet as Bash for metavariable-pattern in rule 'yaml.github-actions.security.curl-eval.curl-eval', `${{` was unexpected",
+      "rationale": "The rule parses the valid GitHub matrix expression inside the cargo fmt command as standalone Bash; actionlint and the workflow test validate this command."
+    },
+    {
+      "code": 3,
+      "level": "warn",
+      "type": "PartialParsing",
+      "path": ".github/workflows/ci.yml",
+      "start": {
+        "line": 38,
+        "column": 21
+      },
+      "end": {
+        "line": 38,
+        "column": 24
+      },
+      "message": "Syntax error at line .github/workflows/ci.yml:38:\n When parsing a snippet as Bash for metavariable-pattern in rule 'yaml.github-actions.security.gha-curl-pipe-shell.gha-curl-pipe-shell', `${{` was unexpected",
+      "rationale": "The rule parses the valid GitHub matrix expression inside the cargo fmt command as standalone Bash; actionlint and the workflow test validate this command."
+    },
+    {
+      "code": 3,
+      "level": "warn",
+      "type": "PartialParsing",
+      "path": ".github/workflows/ci.yml",
+      "start": {
+        "line": 41,
+        "column": 21
+      },
+      "end": {
+        "line": 41,
+        "column": 24
+      },
+      "message": "Syntax error at line .github/workflows/ci.yml:41:\n When parsing a snippet as Bash for metavariable-pattern in rule 'yaml.github-actions.security.curl-eval.curl-eval', `${{` was unexpected",
+      "rationale": "The rule parses the valid GitHub matrix expression inside the cargo clippy command as standalone Bash; actionlint and the workflow test validate this command."
+    },
+    {
+      "code": 3,
+      "level": "warn",
+      "type": "PartialParsing",
+      "path": ".github/workflows/ci.yml",
+      "start": {
+        "line": 41,
+        "column": 21
+      },
+      "end": {
+        "line": 41,
+        "column": 24
+      },
+      "message": "Syntax error at line .github/workflows/ci.yml:41:\n When parsing a snippet as Bash for metavariable-pattern in rule 'yaml.github-actions.security.gha-curl-pipe-shell.gha-curl-pipe-shell', `${{` was unexpected",
+      "rationale": "The rule parses the valid GitHub matrix expression inside the cargo clippy command as standalone Bash; actionlint and the workflow test validate this command."
+    },
+    {
+      "code": 3,
+      "level": "warn",
+      "type": "PartialParsing",
+      "path": ".github/workflows/ci.yml",
+      "start": {
+        "line": 43,
+        "column": 21
+      },
+      "end": {
+        "line": 43,
+        "column": 24
+      },
+      "message": "Syntax error at line .github/workflows/ci.yml:43:\n When parsing a snippet as Bash for metavariable-pattern in rule 'yaml.github-actions.security.curl-eval.curl-eval', `${{` was unexpected",
+      "rationale": "The rule parses the valid GitHub matrix expression inside the cargo test command as standalone Bash; actionlint and the workflow test validate this command."
+    },
+    {
+      "code": 3,
+      "level": "warn",
+      "type": "PartialParsing",
+      "path": ".github/workflows/ci.yml",
+      "start": {
+        "line": 43,
+        "column": 21
+      },
+      "end": {
+        "line": 43,
+        "column": 24
+      },
+      "message": "Syntax error at line .github/workflows/ci.yml:43:\n When parsing a snippet as Bash for metavariable-pattern in rule 'yaml.github-actions.security.gha-curl-pipe-shell.gha-curl-pipe-shell', `${{` was unexpected",
+      "rationale": "The rule parses the valid GitHub matrix expression inside the cargo test command as standalone Bash; actionlint and the workflow test validate this command."
+    }
+  ]
+}

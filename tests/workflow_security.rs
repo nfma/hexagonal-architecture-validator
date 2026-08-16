@@ -88,6 +88,54 @@ fn assert_checkout_credentials_are_disabled(name: &str, workflow: &str) -> usize
     checked
 }
 
+fn named_step<'a>(workflow: &'a str, name: &str) -> &'a str {
+    let marker = format!("      - name: {name}\n");
+    let start = workflow
+        .find(&marker)
+        .unwrap_or_else(|| panic!("missing workflow step: {name}"));
+    let tail = &workflow[start..];
+    let end = tail[marker.len()..]
+        .find("\n      - name: ")
+        .map(|offset| marker.len() + offset)
+        .unwrap_or(tail.len());
+    &tail[..end]
+}
+
+fn assert_semgrep_gate_is_fail_closed(workflow: &str) {
+    let tests = named_step(workflow, "Test Semgrep report checker");
+    assert!(
+        tests.contains("python3 -m unittest tests/test_check_semgrep.py"),
+        "Semgrep checker regressions are not executed"
+    );
+
+    let scan = named_step(workflow, "Run Semgrep community security rules");
+    for required in [
+        "semgrep==1.173.0 semgrep scan \\",
+        "--config p/default \\",
+        "--config p/security-audit \\",
+        "--error \\",
+        "--metrics=off \\",
+        "--exclude target \\",
+        "--json \\",
+        "--output \"$report\" \\",
+        "python3 scripts/check_semgrep.py",
+        "--report \"$report\"",
+        "--baseline .semgrep-baseline.json",
+        "--repository-root .",
+    ] {
+        assert!(
+            scan.contains(required),
+            "Semgrep gate is missing {required}"
+        );
+    }
+    for fail_open in ["continue-on-error:", "|| true", "set +e", "set +o errexit"] {
+        assert!(
+            !scan.contains(fail_open),
+            "Semgrep gate contains fail-open wiring: {fail_open}"
+        );
+    }
+}
+
 #[test]
 fn every_external_action_is_pinned_to_a_full_commit_sha() {
     let checked = workflows()
@@ -152,6 +200,37 @@ fn checkout_validator_rejects_spoofed_or_misindented_credentials() {
 }
 
 #[test]
+fn semgrep_gate_is_fail_closed_and_baselined() {
+    let security = fs::read_to_string(repository_root().join(".github/workflows/security.yml"))
+        .expect("read security workflow");
+
+    assert_semgrep_gate_is_fail_closed(&security);
+}
+
+#[test]
+fn semgrep_gate_validator_rejects_fail_open_mutants() {
+    let security = fs::read_to_string(repository_root().join(".github/workflows/security.yml"))
+        .expect("read security workflow");
+    let mutants = [
+        security.replace("--error \\\n", ""),
+        security.replace("semgrep scan \\\n", "semgrep scan\n"),
+        security.replace(
+            "      - name: Run Semgrep community security rules\n        run: |",
+            "      - name: Run Semgrep community security rules\n        continue-on-error: true\n        run: |",
+        ),
+        security.replace("--repository-root .", "--repository-root . || true"),
+        security.replace(
+            "python3 -m unittest tests/test_check_semgrep.py",
+            "python3 -m unittest",
+        ),
+    ];
+
+    for mutant in mutants {
+        assert!(std::panic::catch_unwind(|| assert_semgrep_gate_is_fail_closed(&mutant)).is_err());
+    }
+}
+
+#[test]
 fn security_workflows_keep_all_expected_gates() {
     let root = repository_root();
     let security = fs::read_to_string(root.join(".github/workflows/security.yml"))
@@ -162,6 +241,7 @@ fn security_workflows_keep_all_expected_gates() {
         .expect("read CodeQL workflow");
 
     assert!(security.contains("semgrep==1.173.0"));
+    assert!(security.contains("--baseline .semgrep-baseline.json"));
     assert!(security.contains("gitleaks git --redact --verbose"));
     assert!(security.contains("version: v0.74.0"));
     assert!(dependency.contains("cargo audit --file Cargo.lock --deny warnings"));

@@ -43,15 +43,25 @@ jobs:
           ./scripts/install-linux-ci-tools.sh "$RUNNER_TEMP/ci-tools"
           echo "$RUNNER_TEMP/ci-tools" >> "$GITHUB_PATH"
 
+      - name: Test Semgrep report checker
+        run: python3 -m unittest tests/test_check_semgrep.py
+
       - name: Run Semgrep community security rules
-        run: >-
-          uvx --no-build --from semgrep==1.173.0 semgrep scan
-          --config p/default
-          --config p/security-audit
-          --error
-          --metrics=off
-          --exclude target
-          .
+        run: |
+          report="$RUNNER_TEMP/semgrep.json"
+          uvx --no-build --from semgrep==1.173.0 semgrep scan \
+            --config p/default \
+            --config p/security-audit \
+            --error \
+            --metrics=off \
+            --exclude target \
+            --json \
+            --output "$report" \
+            .
+          python3 scripts/check_semgrep.py \
+            --report "$report" \
+            --baseline .semgrep-baseline.json \
+            --repository-root .
 
       - name: Scan Git history for secrets
         run: gitleaks git --redact --verbose .
