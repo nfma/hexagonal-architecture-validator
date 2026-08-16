@@ -1,0 +1,89 @@
+name: SonarQube Cloud
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_LLVM_COV_VERSION: "0.6.21"
+  RUST_TOOLCHAIN: "1.86.0"
+
+jobs:
+  sonar:
+    name: SonarQube Cloud
+    runs-on: ubuntu-24.04
+    environment: sonar
+    timeout-minutes: 20
+    steps:
+      - name: Classify pull request trust
+        id: trust
+        env:
+          UNTRUSTED_PULL_REQUEST: >-
+            ${{ github.event_name == 'pull_request' &&
+            (github.event.pull_request.user.login == 'dependabot[bot]' ||
+            github.event.pull_request.head.repo.full_name != github.repository) }}
+        run: |
+          if [ "$UNTRUSTED_PULL_REQUEST" = "true" ]; then
+            echo "trusted=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::Skipping SonarQube Cloud analysis for a Dependabot or fork pull request."
+          else
+            echo "trusted=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Check out full history
+        if: steps.trust.outputs.trusted == 'true'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Install Rust
+        if: steps.trust.outputs.trusted == 'true'
+        run: |
+          rustup toolchain install "$RUST_TOOLCHAIN" \
+            --profile minimal \
+            --component clippy,llvm-tools-preview,rustfmt \
+            --no-self-update
+          rustup default "$RUST_TOOLCHAIN"
+
+      - name: Install cargo-llvm-cov
+        if: steps.trust.outputs.trusted == 'true'
+        run: cargo install cargo-llvm-cov --locked --version "$CARGO_LLVM_COV_VERSION"
+
+      - name: Check formatting
+        if: steps.trust.outputs.trusted == 'true'
+        run: cargo fmt --all -- --check
+
+      - name: Run Clippy
+        if: steps.trust.outputs.trusted == 'true'
+        run: cargo clippy --all-targets --all-features --locked -- -D warnings
+
+      - name: Test with coverage
+        if: steps.trust.outputs.trusted == 'true'
+        run: cargo llvm-cov --all-targets --all-features --locked --lcov --output-path lcov.info
+
+      - name: Check for SonarQube Cloud token
+        if: steps.trust.outputs.trusted == 'true'
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+        run: |
+          if [ -z "$SONAR_TOKEN" ]; then
+            echo "SONAR_TOKEN is required; add it as a repository Actions secret." >&2
+            exit 1
+          fi
+
+      - name: Scan and wait for the quality gate
+        if: steps.trust.outputs.trusted == 'true'
+        uses: SonarSource/sonarqube-scan-action@22918119ff8e1ca75a623e15c8296b6ea4fbe28f # v8.2.1
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+        with:
+          args: -Dsonar.qualitygate.wait=true -Dsonar.qualitygate.timeout=300

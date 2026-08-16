@@ -1,0 +1,26 @@
+version = 1
+preset = "hexagonal"
+
+[analysis]
+strict = true
+detect_cycles = true
+
+[[roles]]
+id = "core"
+modules = ["::core(?:$|::)"]
+
+[[roles]]
+id = "application"
+modules = ["::application(?:$|::)"]
+
+[[roles]]
+id = "port"
+modules = ["::ports?(?:$|::)"]
+
+[[roles]]
+id = "adapter"
+modules = ["::adapters?(?:$|::)"]
+
+[[roles]]
+id = "composition-root"
+modules = ["::composition_root(?:$|::)"]

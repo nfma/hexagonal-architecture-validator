@@ -1,0 +1,80 @@
+# Analysis and limitations
+
+## Mechanism decision
+
+The first release uses Cargo metadata v1 for workspace/package/target discovery
+and `syn` for stable-toolchain syntax parsing.
+
+- Cargo documents `cargo metadata --format-version 1` as the versioned package
+  graph interface and `--no-deps` as workspace-only output that does not fetch
+  dependencies. `hav` additionally passes `--offline` so analysis cannot use
+  the network: [Cargo metadata documentation](https://doc.rust-lang.org/cargo/commands/cargo-metadata.html).
+- `syn::parse_file` parses complete Rust source files on stable Rust and exposes
+  spans used for deterministic evidence:
+  [`syn::parse_file`](https://docs.rs/syn/latest/syn/fn.parse_file.html).
+- rustdoc JSON was rejected for v0.1 because its output mode remains
+  nightly/unstable:
+  [rustdoc unstable JSON output](https://doc.rust-lang.org/nightly/rustdoc/unstable-features.html#json-output).
+- rust-analyzer provides richer semantic resolution, but its internal library
+  surface is a large compiler front end optimized for IDE analysis. Taking that
+  dependency would significantly increase build size and couple v0.1 to an
+  evolving internal API:
+  [rust-analyzer repository](https://github.com/rust-lang/rust-analyzer).
+- Existing `cargo-modules` demonstrates that module dependency and cycle
+  analysis is useful, but its CLI graph is not the versioned role/rule/report
+  contract required here:
+  [cargo-modules repository](https://github.com/regexident/cargo-modules).
+
+The rule vocabulary follows dependency-cruiser's named `from`/`to` dependency
+conditions and explicit unresolved/circular concepts, while intentionally using
+a smaller role-based Rust schema:
+[dependency-cruiser rules reference](https://github.com/sverweij/dependency-cruiser/blob/main/doc/rules-reference.md).
+
+## What is analyzed
+
+- Every non-build-script Rust target in every Cargo workspace package.
+- File modules (`mod name;`), `name.rs`, `name/mod.rs`, inline modules, and
+  literal `#[path = "..."]` modules.
+- `use`, `pub use`, `extern crate`, and syntactic qualified paths.
+- Local `crate`, `self`, and `super` paths.
+- Renamed and unrenamed direct dependencies between workspace library crates.
+- Module-level dependency cycles.
+
+Cargo discovery runs after dependencies are installed, offline, and without
+repository writes by the validator. Analysis only reads manifests and source.
+
+## Determinism
+
+- Paths use `/`, are lexical and workspace-relative, and contain no timestamps.
+- Modules, dependencies, findings, diagnostics, roles, and cycle members use
+  ordered collections and stable sorting.
+- Multiple references between the same source and target module become one
+  edge with the earliest sorted source evidence.
+- JSON has `schema_version = 1`; all fields are emitted in a fixed structure.
+
+## Explicit limitations
+
+These limitations can create false positives or false negatives and are listed
+in every JSON report and the release notes:
+
+- `cfg` predicates and Cargo feature selection are not evaluated. All
+  syntactically present branches are analyzed, which may add inactive edges.
+- Declarative and procedural macros, derives, and attribute macros are not
+  expanded. Generated modules or imports can therefore be missed.
+- `include!` always fails analysis. With strict analysis, other item-position
+  macro invocations also fail instead of being silently trusted.
+- Qualified-path resolution is module-oriented. Method calls, dynamic dispatch,
+  trait implementation semantics, values constructed through reflection, and
+  runtime service lookup do not create edges.
+- External crates are recognized from Cargo dependency declarations but are not
+  parsed. v0.1 rules validate workspace modules and workspace-crate edges.
+- Literal `#[path]` is supported, but macro-computed paths are not Rust syntax
+  and custom nested layout behavior should be covered by project fixtures.
+- Build scripts are excluded. Generated source in `OUT_DIR` is not analyzed.
+- A pass means no violations were found in this declared static model. It does
+  not decide whether ports are meaningful, business logic belongs in the core,
+  adapters translate correctly, or the chosen boundaries fit the product.
+
+Unresolved file modules, parse failures, ambiguous module files, unsupported
+`include!`, and unknown import roots fail with exit code 2. They cannot be
+reported as a clean architectural pass.
