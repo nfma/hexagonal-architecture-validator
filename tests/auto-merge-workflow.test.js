@@ -48,6 +48,14 @@ test("uses a default-branch App-token reconciler without PR code", () => {
   );
   assert.match(reconciler, /vars\.NFMA_AUTO_MERGE_CLIENT_ID/);
   assert.match(reconciler, /secrets\.NFMA_AUTO_MERGE_PRIVATE_KEY/);
+  assert.match(
+    reconciler,
+    /pull-requests: read # Reads structured eligibility state through the API\./,
+  );
+  assert.match(
+    reconciler,
+    /zizmor: ignore\[secrets-outside-env\] Only mints a short-lived token for this repository\./,
+  );
   assert.match(reconciler, /permission-contents: write/);
   assert.match(reconciler, /permission-pull-requests: write/);
   assert.doesNotMatch(
