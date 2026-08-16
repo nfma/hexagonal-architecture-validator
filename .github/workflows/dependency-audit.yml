@@ -1,0 +1,111 @@
+name: Dependency audit
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  schedule:
+    - cron: "30 6 * * 1"
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  cargo-audit:
+    name: RustSec cargo audit
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    env:
+      CARGO_AUDIT_TOOLCHAIN: "1.88.0"
+      CARGO_AUDIT_VERSION: "0.22.2"
+    steps:
+      - name: Install Rust
+        run: |
+          rustup toolchain install "$CARGO_AUDIT_TOOLCHAIN" --profile minimal --no-self-update
+          rustup default "$CARGO_AUDIT_TOOLCHAIN"
+
+      - name: Install pinned cargo-audit
+        run: |
+          cargo install cargo-audit --version "$CARGO_AUDIT_VERSION" --locked
+          installed_audit_version="$(cargo audit --version)"
+          echo "$installed_audit_version"
+          test "${installed_audit_version##* }" = "$CARGO_AUDIT_VERSION"
+
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Audit Cargo.lock against RustSec
+        run: |
+          test -f Cargo.lock
+          cargo audit --file Cargo.lock --deny warnings
+
+  dependency-review:
+    name: GitHub dependency review
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Review dependency changes
+        uses: actions/dependency-review-action@a1d282b36b6f3519aa1f3fc636f609c47dddb294 # v5.0.0
+        with:
+          fail-on-severity: low
+
+  dependabot-alerts:
+    name: GitHub Dependabot alerts
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-24.04
+    environment: dependabot-alerts
+    timeout-minutes: 10
+    steps:
+      - name: Require no open Dependabot alerts
+        env:
+          GH_TOKEN: ${{ secrets.DEPENDABOT_ALERTS_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "${GH_TOKEN:-}" ]; then
+            echo "::warning::Dependabot alerts were NOT checked: DEPENDABOT_ALERTS_TOKEN is not set."
+            echo "::warning::Add a token with Dependabot-alerts read access to enable this check."
+            echo "Dependabot alert check did not run: DEPENDABOT_ALERTS_TOKEN is not configured."
+            echo "This is not a clean result — it is an unchecked one."
+            exit 0
+          fi
+
+          if ! alerts=$(gh api \
+            "repos/${GITHUB_REPOSITORY}/dependabot/alerts?state=open&per_page=100" \
+            2>&1); then
+            echo "Could not read Dependabot alerts:" >&2
+            echo "$alerts" >&2
+            echo >&2
+            echo "DEPENDABOT_ALERTS_TOKEN is set but cannot read the alerts API;" >&2
+            echo "it most likely lacks Dependabot-alerts read access." >&2
+            exit 1
+          fi
+
+          count=$(printf '%s' "$alerts" | jq 'length')
+          if [ "$count" -eq 0 ]; then
+            echo "No open Dependabot alerts."
+            exit 0
+          fi
+
+          echo "$count open Dependabot alert(s):" >&2
+          printf '%s' "$alerts" | jq -r '.[]
+            | "  \(.security_advisory.severity)\t\(.dependency.package.name)\t\(.dependency.scope)\t"
+              + "fixed in \(.security_vulnerability.first_patched_version.identifier // "no patch available")"' >&2
+          exit 1
