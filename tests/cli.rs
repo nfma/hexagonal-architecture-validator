@@ -652,6 +652,19 @@ fn block_local_module_names_take_precedence_over_workspace_crates() {
         "block-local module names must not hide a sibling dependency: {}",
         String::from_utf8_lossy(&output.stdout)
     );
+
+    let unresolved = workspace_shadow_project(
+        "workspace-unresolved-module-real-dependency",
+        "pub mod domain;\npub fn leak() { let _ = domain::adapter::Leak; }\n",
+    );
+    let output = unresolved.run("json");
+    assert_eq!(output.status.code(), Some(2));
+    let report = json_report(&output);
+    assert_eq!(report["summary"]["dependencies"], 1);
+    assert_eq!(report["summary"]["violations"], 1);
+    assert_eq!(report["summary"]["analysis_errors"], 1);
+    assert_eq!(report["findings"][0]["rule_id"], "core-no-adapter");
+    assert_eq!(report["analysis_errors"][0]["code"], "unresolved-module");
 }
 
 #[test]

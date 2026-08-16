@@ -26,6 +26,9 @@ First release of `hav`, a deterministic Rust dependency-boundary validator.
 - Lexical import aliases retain their terminal module. Dependencies through
   public re-exports still fail closed when they could cross a forbidden rule;
   the full visibility graph is not modeled.
+- Locally shadowed names take precedence over workspace-crate names. Block-local
+  module bodies are not analyzed, and a `use` through one fails closed as
+  `unresolved-import`.
 - External crates and build-script generated source are not parsed.
 - Method calls, dynamic dispatch, and runtime relationships do not create
   dependency edges.
