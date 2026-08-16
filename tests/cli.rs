@@ -7,7 +7,6 @@ use hexagonal_architecture_validator::analyzer::{AnalysisOptions, analyze};
 use hexagonal_architecture_validator::config::LoadedConfig;
 use hexagonal_architecture_validator::evaluate::evaluate;
 use hexagonal_architecture_validator::model::Outcome;
-use hexagonal_architecture_validator::report::render_text;
 
 static SCRATCH_SEQUENCE: AtomicUsize = AtomicUsize::new(0);
 
@@ -682,10 +681,10 @@ fn applied_exemptions_are_narrow_auditable_and_preserve_exit_contracts() {
 }
 
 #[test]
-fn shipped_example_analyzes_this_repository_without_mutation() {
+fn root_configuration_analyzes_this_repository_without_mutation() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let config_path = root.join("examples/hexagonal.hav.toml");
-    let config = LoadedConfig::load(&config_path).expect("shipped example config must load");
+    let config_path = root.join("hav.toml");
+    let config = LoadedConfig::load(&config_path).expect("root config must load");
     let status_before = Command::new("git")
         .current_dir(root)
         .args(["status", "--porcelain=v1", "--untracked-files=all"])
@@ -711,51 +710,86 @@ fn shipped_example_analyzes_this_repository_without_mutation() {
     assert_eq!(report.outcome, Outcome::Passed);
     assert!(report.analysis_errors.is_empty());
     assert!(report.findings.is_empty());
-    assert_eq!(report.notices.len(), 4);
-    assert!(
-        report
-            .notices
-            .iter()
-            .all(|notice| notice.code == "preset-role-unmatched")
-    );
-    let text = render_text(&report);
-    assert!(text.contains(
-        "notice[preset-role-unmatched] preset role 'adapter' matched no discovered modules"
-    ));
 }
 
 #[test]
-fn unmatched_preset_roles_are_non_fatal_notices() {
+fn shipped_example_validates_the_compliant_fixture_and_applies_a_real_exception() {
+    let repository = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let config_path = repository.join("examples/hexagonal.hav.toml");
+    let config = LoadedConfig::load(&config_path).expect("shipped example config must load");
+    let compliant_root = fixture("compliant");
+    let graph = analyze(AnalysisOptions {
+        root: &compliant_root,
+        manifest_path: None,
+        strict: config.analysis.strict,
+    })
+    .expect("the compliant fixture must analyze");
+    let report = evaluate(graph, &config);
+    assert_eq!(report.outcome, Outcome::Passed);
+    assert!(report.analysis_errors.is_empty());
+    assert!(report.findings.is_empty());
+
+    let project = ScratchProject::basic(
+        "shipped-example-exemption",
+        "pub mod adapter;\npub mod application;\npub mod composition_root;\npub mod core;\npub mod ports;\n",
+        include_str!("../examples/hexagonal.hav.toml"),
+    );
+    project.write(
+        "src/adapter.rs",
+        "use crate::composition_root;\npub fn start() { composition_root::start(); }\n",
+    );
+    project.write("src/application.rs", "pub fn run() {}\n");
+    project.write("src/composition_root.rs", "pub fn start() {}\n");
+    project.write("src/core.rs", "pub struct Order;\n");
+    project.write("src/ports.rs", "pub trait Orders {}\n");
+    assert!(
+        project.rustc().status.success(),
+        "non-vacuous example fixture must compile with rustc"
+    );
+    let output = project.run("json");
+    assert_eq!(output.status.code(), Some(0));
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(value["summary"]["exemptions"], 1);
+    assert_eq!(
+        value["exemptions"][0]["allowed_rule_id"],
+        "adapter-startup-hook"
+    );
+    assert_eq!(
+        value["exemptions"][0]["forbidden_rule_id"],
+        "adapters-must-not-depend-on-composition-root"
+    );
+}
+
+#[test]
+fn unmatched_preset_role_fails_analysis() {
     let config = "version = 1\npreset = \"hexagonal\"\n\n[[roles]]\nid = \"core\"\nmodules = [\"::core$\"]\n\n[[roles]]\nid = \"application\"\nmodules = [\"::application$\"]\n\n[[roles]]\nid = \"port\"\nmodules = [\"::port$\"]\n\n[[roles]]\nid = \"adapter\"\nmodules = [\"::adapter$\"]\n\n[[roles]]\nid = \"composition-root\"\nmodules = [\"::composition_root$\"]\n";
     let project = ScratchProject::basic(
-        "preset-unmatched-notice",
-        "pub mod core { pub struct Order; }\n",
+        "preset-unmatched",
+        "pub mod application {}\npub mod composition_root {}\npub mod core {}\npub mod port {}\n",
         config,
     );
+    assert!(project.rustc().status.success());
     let output = project.run("text");
-    assert_eq!(output.status.code(), Some(0));
+    assert_eq!(output.status.code(), Some(2));
     let stdout = String::from_utf8(output.stdout).unwrap();
-    assert!(stdout.contains(
-        "notice[preset-role-unmatched] preset role 'adapter' matched no discovered modules"
-    ));
-    assert!(!stdout.contains("role-matched-no-modules"));
+    assert_eq!(stdout.matches("error[role-matched-no-modules]").count(), 1);
+    assert!(stdout.contains("declared role 'adapter' matched no discovered modules"));
+}
 
-    let json = project.run("json");
-    assert_eq!(json.status.code(), Some(0));
-    let value: serde_json::Value = serde_json::from_slice(&json.stdout).unwrap();
-    assert_eq!(value["summary"]["notices"], 4);
-    assert_eq!(value["notices"].as_array().unwrap().len(), 4);
-
-    let violating = ScratchProject::basic(
-        "preset-notice-with-violation",
-        "pub mod adapter { pub struct Console; }\npub mod core { use crate::adapter::Console; pub fn run(_: Console) {} }\n",
+#[test]
+fn unmatched_role_cannot_mask_a_real_forbidden_dependency() {
+    let config = "version = 1\npreset = \"hexagonal\"\n\n[[roles]]\nid = \"core\"\nmodules = [\"::kore$\"]\n\n[[roles]]\nid = \"application\"\nmodules = [\"::application$\"]\n\n[[roles]]\nid = \"port\"\nmodules = [\"::port$\"]\n\n[[roles]]\nid = \"adapter\"\nmodules = [\"::adapter$\"]\n\n[[roles]]\nid = \"composition-root\"\nmodules = [\"::composition_root$\"]\n";
+    let project = ScratchProject::basic(
+        "preset-masked-forbidden-edge",
+        "pub mod adapter { pub struct Console; }\npub mod application {}\npub mod composition_root {}\npub mod core { use crate::adapter::Console; pub fn run(_: Console) {} }\npub mod port {}\n",
         config,
     );
-    let output = violating.run("text");
-    assert_eq!(output.status.code(), Some(1));
+    assert!(project.rustc().status.success());
+    let output = project.run("text");
+    assert_eq!(output.status.code(), Some(2));
     let stdout = String::from_utf8(output.stdout).unwrap();
-    assert!(stdout.contains("error[core-must-not-depend-on-adapters]"));
-    assert!(stdout.contains("notice[preset-role-unmatched]"));
+    assert!(stdout.contains("error[role-matched-no-modules]"));
+    assert!(stdout.contains("declared role 'core' matched no discovered modules"));
 }
 
 #[test]

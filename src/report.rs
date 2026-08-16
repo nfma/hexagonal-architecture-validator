@@ -74,10 +74,6 @@ pub fn render_text(report: &ValidationReport) -> String {
         }
     }
     if matches!(report.outcome, Outcome::Passed | Outcome::Violations) {
-        for notice in &report.notices {
-            writeln!(output, "notice[{}] {}", notice.code, notice.message)
-                .expect("writing to a String cannot fail");
-        }
         for exemption in &report.exemptions {
             writeln!(
                 output,

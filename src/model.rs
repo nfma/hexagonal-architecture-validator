@@ -96,7 +96,6 @@ pub struct Summary {
     pub dependencies: usize,
     pub violations: usize,
     pub analysis_errors: usize,
-    pub notices: usize,
     pub exemptions: usize,
 }
 
@@ -111,6 +110,5 @@ pub struct ValidationReport {
     pub findings: Vec<Finding>,
     pub exemptions: Vec<AppliedExemption>,
     pub analysis_errors: Vec<AnalysisDiagnostic>,
-    pub notices: Vec<AnalysisDiagnostic>,
     pub limitations: Vec<&'static str>,
 }

@@ -1,0 +1,21 @@
+version = 1
+
+[analysis]
+strict = true
+detect_cycles = true
+
+[[roles]]
+id = "engine"
+description = "Static discovery, configuration, evaluation, and report data"
+paths = ["^src/(?:analyzer|config|evaluate|model)\\.rs$"]
+
+[[roles]]
+id = "interface"
+description = "Library, CLI, and report rendering boundaries"
+paths = ["^src/(?:lib|main|report)\\.rs$"]
+
+[[forbidden]]
+id = "engine-must-not-depend-on-interface"
+description = "The validation engine must not depend on delivery interfaces"
+from = ["engine"]
+to = ["interface"]

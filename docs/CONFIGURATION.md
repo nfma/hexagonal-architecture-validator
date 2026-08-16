@@ -41,15 +41,8 @@ paths = ["^src/domain/"]        # optional Rust regular expressions
 Role and rule IDs match `^[a-z][a-z0-9-]*$`. At least one `modules` or `paths`
 pattern is required. A module may have multiple roles; matching any configured
 pattern assigns the role. Every declared role must match at least one discovered
-module. An unmatched role normally fails analysis with
-`role-matched-no-modules`. When the hexagonal preset mandates a role that the
-project does not populate, `hav` instead emits a non-fatal
-`preset-role-unmatched` notice. Unclassified modules remain in the graph but do
-not match role rules.
-
-JSON reports always contain top-level `notices` and `summary.notices`, including
-when empty. Passed and Violations text reports render each notice as
-`notice[preset-role-unmatched] <message>`.
+module. An unmatched role fails analysis with `role-matched-no-modules`.
+Unclassified modules remain in the graph but do not match role rules.
 
 Module IDs are stable strings of the form:
 

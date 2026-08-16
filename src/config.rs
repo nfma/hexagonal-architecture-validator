@@ -113,7 +113,6 @@ pub struct LoadedConfig {
     pub roles: Vec<Role>,
     pub forbidden: Vec<Rule>,
     pub allowed: Vec<Rule>,
-    pub preset_mandated_roles: BTreeSet<String>,
 }
 
 impl LoadedConfig {
@@ -142,12 +141,8 @@ impl LoadedConfig {
             .map(|role| compile_role(role, &id_pattern, &mut seen_role_ids))
             .collect::<anyhow::Result<Vec<_>>>()?;
 
-        let preset_mandated_roles = match file.preset {
-            Some(Preset::Hexagonal) => HEXAGONAL_ROLE_IDS.into_iter().map(str::to_owned).collect(),
-            None => BTreeSet::new(),
-        };
         let mut rules = file.forbidden;
-        if !preset_mandated_roles.is_empty() {
+        if matches!(file.preset, Some(Preset::Hexagonal)) {
             require_hexagonal_roles(&seen_role_ids)?;
             rules.extend(hexagonal_rules());
         }
@@ -188,7 +183,6 @@ impl LoadedConfig {
             roles,
             forbidden,
             allowed,
-            preset_mandated_roles,
         })
     }
 }

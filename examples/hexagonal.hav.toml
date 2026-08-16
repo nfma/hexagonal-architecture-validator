@@ -25,11 +25,12 @@ paths = ["^src/ports(?:/|\\.rs$)"]
 [[roles]]
 id = "adapter"
 description = "Technology-specific incoming and outgoing adapters"
-paths = ["^src/adapters(?:/|\\.rs$)"]
+paths = ["^src/adapters?(?:/|\\.rs$)"]
 
 [[roles]]
 id = "composition-root"
 description = "Narrow application wiring and startup boundary"
+modules = ["::composition_root(?:$|::)"]
 paths = ["^src/main\\.rs$", "^src/bin/[^/]+\\.rs$"]
 
 # Allowed rules are explicit, narrow exceptions to named forbidden rules. This

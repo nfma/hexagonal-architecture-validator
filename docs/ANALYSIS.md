@@ -49,8 +49,8 @@ repository writes by the validator. Analysis only reads manifests and source.
 
 - Paths use `/`, are canonicalized for containment, rendered workspace-relative,
   and contain no timestamps.
-- Modules, dependencies, findings, diagnostics, notices, roles, and cycle
-  members use ordered collections and stable sorting.
+- Modules, dependencies, findings, diagnostics, roles, and cycle members use
+  ordered collections and stable sorting.
 - Multiple references between the same source and target module become one
   edge with the earliest sorted source evidence.
 - JSON has `schema_version = 1`; all fields are emitted in a fixed structure.
@@ -90,7 +90,6 @@ in every JSON report and the release notes:
 | `module-outside-workspace` | A module source resolves outside the canonical Cargo workspace root. |
 | `opaque-reexport` | A cross-role dependency terminates at a re-export that v0.1 cannot follow completely. |
 | `parse-failed` | A discovered Rust source file cannot be parsed by `syn`. |
-| `preset-role-unmatched` | Non-fatal notice: a hexagonal-preset role matches no discovered module. |
 | `recursive-module-source` | A module recursively resolves to a canonical source already being inspected. |
 | `role-matched-no-modules` | A declared role matches no discovered module. |
 | `source-read-failed` | A source cannot be canonicalized or read. |
@@ -99,6 +98,5 @@ in every JSON report and the release notes:
 | `unsupported-include` | Any bare or qualified `include!` invocation requires unsupported expansion. |
 | `unsupported-item-macro` | Strict analysis encountered another item-position macro it cannot expand. |
 
-`preset-role-unmatched` is a notice and does not affect outcome or exit code.
-Every other diagnostic in this table fails with exit code 2 and cannot be
-reported as a clean architectural pass.
+Every diagnostic in this table fails with exit code 2 and cannot be reported as
+a clean architectural pass.

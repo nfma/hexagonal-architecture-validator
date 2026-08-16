@@ -37,11 +37,9 @@ Exit codes are part of the CLI contract:
 
 Configuration is explicit and versioned. Roles map module IDs or normalized
 workspace-relative source paths to architectural intent. Every declared role
-must match at least one module, except roles the hexagonal preset mandates but
-the project does not populate, which produce a non-fatal notice. Forbidden rules
-match dependencies by source and target roles. Allowed rules must name the exact
-forbidden IDs they exempt, and every applied exemption appears in JSON and text
-reports.
+must match at least one module. Forbidden rules match dependencies by source and
+target roles. Allowed rules must name the exact forbidden IDs they exempt, and
+every applied exemption appears in JSON and text reports.
 
 ```toml
 version = 1

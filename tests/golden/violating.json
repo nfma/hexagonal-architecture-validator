@@ -7,7 +7,6 @@
     "dependencies": 1,
     "violations": 1,
     "analysis_errors": 0,
-    "notices": 0,
     "exemptions": 0
   },
   "modules": [
@@ -81,7 +80,6 @@
   ],
   "exemptions": [],
   "analysis_errors": [],
-  "notices": [],
   "limitations": [
     "cfg predicates are not evaluated; same-file declarations coalesce and differing files fail analysis",
     "procedural and declarative macros are not expanded",
