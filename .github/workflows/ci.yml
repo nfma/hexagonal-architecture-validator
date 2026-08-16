@@ -1,0 +1,56 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    name: Rust ${{ matrix.toolchain }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - toolchain: stable
+            lint: true
+          - toolchain: 1.86.0
+            lint: false
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install Rust toolchain
+        run: rustup toolchain install "${{ matrix.toolchain }}" --profile minimal --no-self-update
+      - name: Install lint components
+        if: matrix.lint
+        run: rustup component add --toolchain "${{ matrix.toolchain }}" rustfmt clippy
+      - name: Check formatting
+        if: matrix.lint
+        run: cargo +${{ matrix.toolchain }} fmt --all -- --check
+      - name: Run Clippy
+        if: matrix.lint
+        run: cargo +${{ matrix.toolchain }} clippy --all-targets --all-features --locked -- -D warnings
+      - name: Run tests
+        run: cargo +${{ matrix.toolchain }} test --all-targets --locked
+
+  dependency-policy:
+    name: Dependency policy
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Check advisories, licenses, bans, and sources
+        uses: EmbarkStudios/cargo-deny-action@c3bbe7e4e3f7baeee1a3dd9aec0a3b2aded580fb # v2.1.1
+        with:
+          command: check

@@ -1,0 +1,8 @@
+version = 1
+
+[analysis]
+detect_cycles = true
+
+[[roles]]
+id = "module"
+paths = ["^src/"]

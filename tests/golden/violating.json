@@ -1,0 +1,66 @@
+{
+  "schema_version": 1,
+  "tool_version": "0.1.0",
+  "outcome": "violations",
+  "summary": {
+    "modules": 3,
+    "dependencies": 1,
+    "violations": 1,
+    "analysis_errors": 0
+  },
+  "modules": [
+    {
+      "id": "violating-fixture::lib(violating_fixture)",
+      "package": "violating-fixture",
+      "target": "violating-fixture::lib(violating_fixture)",
+      "module": "violating-fixture::lib(violating_fixture)",
+      "source": "src/lib.rs"
+    },
+    {
+      "id": "violating-fixture::lib(violating_fixture)::adapter",
+      "package": "violating-fixture",
+      "target": "violating-fixture::lib(violating_fixture)",
+      "module": "violating-fixture::lib(violating_fixture)::adapter",
+      "source": "src/adapter.rs"
+    },
+    {
+      "id": "violating-fixture::lib(violating_fixture)::core",
+      "package": "violating-fixture",
+      "target": "violating-fixture::lib(violating_fixture)",
+      "module": "violating-fixture::lib(violating_fixture)::core",
+      "source": "src/core.rs"
+    }
+  ],
+  "dependencies": [
+    {
+      "source": "violating-fixture::lib(violating_fixture)::core",
+      "target": "violating-fixture::lib(violating_fixture)::adapter",
+      "evidence": {
+        "path": "src/core.rs",
+        "line": 1,
+        "expression": "crate::adapter::Console"
+      }
+    }
+  ],
+  "findings": [
+    {
+      "rule_id": "core-must-not-depend-on-adapters",
+      "kind": "forbidden-dependency",
+      "message": "Core code must not depend on concrete adapters",
+      "source": "violating-fixture::lib(violating_fixture)::core",
+      "target": "violating-fixture::lib(violating_fixture)::adapter",
+      "evidence": {
+        "path": "src/core.rs",
+        "line": 1,
+        "expression": "crate::adapter::Console"
+      }
+    }
+  ],
+  "analysis_errors": [],
+  "limitations": [
+    "cfg predicates are not evaluated; all syntactically present branches are analyzed",
+    "procedural and declarative macros are not expanded",
+    "method calls, dynamic dispatch, and runtime relationships do not create dependency edges",
+    "a passing result is evidence for declared static boundaries, not proof of architectural quality"
+  ]
+}

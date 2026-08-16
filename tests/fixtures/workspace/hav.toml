@@ -1,0 +1,14 @@
+version = 1
+
+[[roles]]
+id = "core"
+modules = ["^domain::lib\\(domain\\)"]
+
+[[roles]]
+id = "adapter"
+modules = ["^adapter::lib\\(adapter\\)"]
+
+[[forbidden]]
+id = "core-must-not-depend-on-adapter"
+from = ["core"]
+to = ["adapter"]

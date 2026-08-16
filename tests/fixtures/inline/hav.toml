@@ -1,0 +1,22 @@
+version = 1
+preset = "hexagonal"
+
+[[roles]]
+id = "core"
+modules = ["::core(?:$|::)"]
+
+[[roles]]
+id = "application"
+modules = ["::application(?:$|::)"]
+
+[[roles]]
+id = "port"
+modules = ["::port(?:$|::)"]
+
+[[roles]]
+id = "adapter"
+modules = ["::adapter(?:$|::)"]
+
+[[roles]]
+id = "composition-root"
+modules = ["::composition_root(?:$|::)"]

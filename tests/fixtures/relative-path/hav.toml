@@ -1,0 +1,14 @@
+version = 1
+
+[[roles]]
+id = "core"
+modules = ["::domain$"]
+
+[[roles]]
+id = "adapter"
+modules = ["::adapter$"]
+
+[[forbidden]]
+id = "core-must-not-depend-on-adapter"
+from = ["core"]
+to = ["adapter"]
