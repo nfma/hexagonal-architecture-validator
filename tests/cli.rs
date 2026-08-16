@@ -636,8 +636,8 @@ fn block_local_module_names_take_precedence_over_workspace_crates() {
     }
 
     let control = workspace_shadow_project(
-        "workspace-block-module-real-dependency",
-        "pub fn call() { let _ = domain::adapter::Leak; }\n",
+        "workspace-block-module-sibling-scope",
+        "pub fn local() {\n    mod domain { pub fn helper() {} }\n    domain::helper();\n}\npub fn leak() { let _ = domain::adapter::Leak; }\n",
     );
     let cargo = control.cargo_check();
     assert!(
@@ -649,7 +649,7 @@ fn block_local_module_names_take_precedence_over_workspace_crates() {
     assert_eq!(output.status.code(), Some(1));
     assert!(
         String::from_utf8_lossy(&output.stdout).contains("error[core-no-adapter]"),
-        "control must retain the real dependency: {}",
+        "block-local module names must not hide a sibling dependency: {}",
         String::from_utf8_lossy(&output.stdout)
     );
 }
