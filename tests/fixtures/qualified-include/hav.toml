@@ -1,0 +1,17 @@
+version = 1
+
+[analysis]
+detect_cycles = false
+
+[[roles]]
+id = "core"
+paths = ["^src/core\\.rs$"]
+
+[[roles]]
+id = "adapter"
+paths = ["^src/adapter\\.rs$"]
+
+[[forbidden]]
+id = "core-must-not-depend-on-adapter"
+from = ["core"]
+to = ["adapter"]

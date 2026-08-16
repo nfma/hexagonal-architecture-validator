@@ -1,0 +1,8 @@
+version = 1
+
+[analysis]
+detect_cycles = false
+
+[[roles]]
+id = "missing"
+modules = ["::never$"]

@@ -11,7 +11,102 @@ use syn::{Attribute, Item, ItemExternCrate, ItemMacro, ItemUse, Macro, Path as S
 
 use crate::model::{AnalysisDiagnostic, Dependency, DependencyGraph, Evidence, Module};
 
-const STANDARD_CRATES: [&str; 5] = ["alloc", "core", "proc_macro", "std", "test"];
+const STANDARD_CRATES: [&str; 4] = ["alloc", "core", "proc_macro", "std"];
+const STANDARD_PRELUDE_NAMES: &[&str] = &[
+    "AsMut",
+    "AsRef",
+    "AsyncFn",
+    "AsyncFnMut",
+    "AsyncFnOnce",
+    "Box",
+    "Clone",
+    "Copy",
+    "Debug",
+    "Default",
+    "DoubleEndedIterator",
+    "Drop",
+    "Eq",
+    "Err",
+    "ExactSizeIterator",
+    "Extend",
+    "Fn",
+    "FnMut",
+    "FnOnce",
+    "From",
+    "FromIterator",
+    "Future",
+    "Hash",
+    "Into",
+    "IntoFuture",
+    "IntoIterator",
+    "Iterator",
+    "None",
+    "Ok",
+    "Option",
+    "Ord",
+    "PartialEq",
+    "PartialOrd",
+    "Result",
+    "Send",
+    "Sized",
+    "Some",
+    "String",
+    "Sync",
+    "ToOwned",
+    "ToString",
+    "TryFrom",
+    "TryInto",
+    "Unpin",
+    "Vec",
+    "align_of",
+    "align_of_val",
+    "alloc_error_handler",
+    "assert",
+    "assert_eq",
+    "assert_ne",
+    "bench",
+    "cfg",
+    "column",
+    "compile_error",
+    "concat",
+    "dbg",
+    "debug_assert",
+    "debug_assert_eq",
+    "debug_assert_ne",
+    "derive",
+    "drop",
+    "env",
+    "eprint",
+    "eprintln",
+    "file",
+    "format",
+    "format_args",
+    "global_allocator",
+    "include",
+    "include_bytes",
+    "include_str",
+    "is_x86_feature_detected",
+    "line",
+    "matches",
+    "module_path",
+    "option_env",
+    "panic",
+    "print",
+    "println",
+    "size_of",
+    "size_of_val",
+    "stringify",
+    "test",
+    "test_case",
+    "thread_local",
+    "todo",
+    "try",
+    "unimplemented",
+    "unreachable",
+    "vec",
+    "write",
+    "writeln",
+];
 
 pub struct AnalysisOptions<'a> {
     pub root: &'a Path,
@@ -45,6 +140,12 @@ struct RawDependency {
     evidence: Evidence,
 }
 
+#[derive(Default)]
+struct ModuleImports {
+    bindings: BTreeMap<String, Vec<String>>,
+    glob_prefixes: BTreeSet<Vec<String>>,
+}
+
 struct Analyzer {
     workspace_root: PathBuf,
     strict: bool,
@@ -53,6 +154,7 @@ struct Analyzer {
     raw_dependencies: Vec<RawDependency>,
     module_paths: BTreeMap<(String, String), String>,
     module_items: BTreeMap<(String, String), BTreeSet<String>>,
+    module_imports: BTreeMap<(String, String), ModuleImports>,
     visited_modules: BTreeSet<String>,
 }
 
@@ -61,20 +163,19 @@ pub fn analyze(options: AnalysisOptions<'_>) -> anyhow::Result<DependencyGraph> 
         .root
         .canonicalize()
         .with_context(|| format!("analysis root does not exist: {}", options.root.display()))?;
-    let manifest_path = options.manifest_path.map(|path| {
-        if path.is_absolute() {
-            path.to_path_buf()
-        } else {
-            root.join(path)
-        }
-    });
+    let manifest_path = match options.manifest_path {
+        Some(path) if path.is_absolute() => path.to_path_buf(),
+        Some(path) => root.join(path),
+        None => root.join("Cargo.toml"),
+    };
+    if !manifest_path.is_file() {
+        bail!("Cargo manifest does not exist: {}", manifest_path.display());
+    }
 
     let mut command = MetadataCommand::new();
     command.current_dir(&root).no_deps();
     command.other_options(vec!["--offline".to_owned()]);
-    if let Some(path) = &manifest_path {
-        command.manifest_path(path);
-    }
+    command.manifest_path(&manifest_path);
     let metadata = command
         .exec()
         .context("cargo metadata failed in offline mode")?;
@@ -95,6 +196,7 @@ pub fn analyze(options: AnalysisOptions<'_>) -> anyhow::Result<DependencyGraph> 
         raw_dependencies: Vec::new(),
         module_paths: BTreeMap::new(),
         module_items: BTreeMap::new(),
+        module_imports: BTreeMap::new(),
         visited_modules: BTreeSet::new(),
     };
 
@@ -265,29 +367,24 @@ impl Analyzer {
         };
 
         self.register_module(target, &segments, source);
-        self.inspect_items(
-            target,
-            &module_id,
-            &segments,
-            source,
-            module_dir,
-            &file.items,
-        )
+        self.inspect_items(target, &segments, source, module_dir, false, &file.items)
     }
 
     fn inspect_items(
         &mut self,
         target: &TargetInfo,
-        current_module_id: &str,
         segments: &[String],
         source: &Path,
         module_dir: &Path,
+        inside_inline_module: bool,
         items: &[Item],
     ) -> anyhow::Result<()> {
         self.register_items(target, segments, items);
+        self.register_imports(target, segments, items);
+        let current_module_id = module_id(&target.root_id, segments);
         let source_normalized = self.normalize_path(source);
         let mut visitor = DependencyVisitor::new(
-            current_module_id,
+            &current_module_id,
             &target.root_id,
             segments,
             &source_normalized,
@@ -321,17 +418,23 @@ impl Analyzer {
                 let child_dir = module_dir.join(&child_name);
                 self.inspect_items(
                     target,
-                    &child_id,
                     &child_segments,
                     source,
                     &child_dir,
+                    true,
                     inline_items,
                 )?;
                 continue;
             }
 
             let line = item_mod.span().start().line;
-            match resolve_module_file(source, module_dir, &child_name, &item_mod.attrs) {
+            match resolve_module_file(
+                source,
+                module_dir,
+                inside_inline_module,
+                &child_name,
+                &item_mod.attrs,
+            ) {
                 Ok((child_source, child_dir)) => {
                     self.discover_file_module(target, child_segments, &child_source, &child_dir)?;
                 }
@@ -365,6 +468,19 @@ impl Analyzer {
         let names = items.iter().filter_map(item_name).collect::<BTreeSet<_>>();
         self.module_items
             .insert((target.root_id.clone(), segments.join("::")), names);
+    }
+
+    fn register_imports(&mut self, target: &TargetInfo, segments: &[String], items: &[Item]) {
+        let mut imports = ModuleImports::default();
+        for item_use in items.iter().filter_map(|item| match item {
+            Item::Use(item_use) => Some(item_use),
+            _ => None,
+        }) {
+            collect_use_bindings(&item_use.tree, Vec::new(), &mut imports.bindings);
+            collect_glob_prefixes(&item_use.tree, Vec::new(), &mut imports.glob_prefixes);
+        }
+        self.module_imports
+            .insert((target.root_id.clone(), segments.join("::")), imports);
     }
 
     fn resolve_dependencies(&mut self) {
@@ -414,70 +530,232 @@ impl Analyzer {
         if raw.segments.is_empty() {
             return Resolution::LocalItem;
         }
+        let segments = match self.expand_module_bindings(raw) {
+            Ok(segments) => segments,
+            Err(message) => return Resolution::Unresolved(message),
+        };
+        let resolution = self.resolve_segments(raw, &segments);
+        if !matches!(resolution, Resolution::Unresolved(_)) {
+            return resolution;
+        }
+        match self.expand_glob_import(raw, &segments) {
+            Ok(Some(glob_expanded)) => self.resolve_segments(raw, &glob_expanded),
+            Ok(None) => resolution,
+            Err(message) => Resolution::Unresolved(message),
+        }
+    }
+
+    fn resolve_segments(&self, raw: &RawDependency, segments: &[String]) -> Resolution {
         let target = self
             .targets
             .get(&raw.target_root)
             .expect("raw dependency refers to a known target");
-        let mut segments = raw.segments.as_slice();
-        let mut target_root = raw.target_root.as_str();
-        let mut candidate = Vec::new();
+        if let Some(resolution) = self.resolve_explicit_path(raw, segments) {
+            return self.finish_resolution(resolution);
+        }
+        if let Some(resolution) = self.resolve_current_module_scope(raw, segments) {
+            return self.finish_resolution(resolution);
+        }
+        if let Some(resolution) = self.resolve_crate_alias(target, segments) {
+            return self.finish_resolution(resolution);
+        }
+        if is_standard_crate(&segments[0]) {
+            return Resolution::External;
+        }
+        if let Some(resolution) = self.resolve_top_level_module(raw, segments) {
+            return self.finish_resolution(resolution);
+        }
+        if is_standard_prelude_name(&segments[0]) {
+            return Resolution::External;
+        }
+        if self.is_crate_root_item(raw, &segments[0]) {
+            return Resolution::LocalItem;
+        }
+        Resolution::Unresolved(format!(
+            "could not resolve import root '{}' in target '{}'",
+            segments[0], target.name
+        ))
+    }
 
-        match segments[0].as_str() {
-            "crate" => segments = &segments[1..],
-            "self" => {
-                candidate = raw.current_segments.clone();
-                segments = &segments[1..];
-            }
-            "super" => {
-                candidate = raw.current_segments.clone();
-                while segments.first().is_some_and(|segment| segment == "super") {
-                    if candidate.pop().is_none() {
-                        return Resolution::Unresolved(format!(
-                            "'{}' traverses beyond the crate root",
-                            raw.evidence.expression
-                        ));
-                    }
-                    segments = &segments[1..];
-                }
-            }
-            first if target.workspace_aliases.contains_key(first) => {
-                target_root = target
-                    .workspace_aliases
-                    .get(first)
-                    .expect("workspace alias was checked");
-                segments = &segments[1..];
-            }
-            first
-                if target.external_aliases.contains(first) || STANDARD_CRATES.contains(&first) =>
-            {
-                return Resolution::External;
-            }
-            first => {
-                let top_level_key = (raw.target_root.clone(), first.to_owned());
-                if !self.module_paths.contains_key(&top_level_key) {
-                    if self
-                        .module_items
-                        .get(&(raw.target_root.clone(), String::new()))
-                        .is_some_and(|items| items.contains(first))
-                    {
-                        return Resolution::LocalItem;
-                    }
-                    return Resolution::Unresolved(format!(
-                        "could not resolve import root '{}' in target '{}'",
-                        first, target.name
-                    ));
-                }
+    fn expand_module_bindings(&self, raw: &RawDependency) -> Result<Vec<String>, String> {
+        let import_key = (raw.target_root.clone(), raw.current_segments.join("::"));
+        let Some(imports) = self.module_imports.get(&import_key) else {
+            return Ok(raw.segments.clone());
+        };
+        expand_bindings(
+            &imports.bindings,
+            raw.segments.clone(),
+            &raw.evidence.expression,
+        )
+    }
+
+    fn expand_glob_import(
+        &self,
+        raw: &RawDependency,
+        segments: &[String],
+    ) -> Result<Option<Vec<String>>, String> {
+        if segments
+            .first()
+            .is_some_and(|first| matches!(first.as_str(), "crate" | "self" | "super"))
+        {
+            return Ok(None);
+        }
+        let import_key = (raw.target_root.clone(), raw.current_segments.join("::"));
+        let Some(imports) = self.module_imports.get(&import_key) else {
+            return Ok(None);
+        };
+
+        for prefix in &imports.glob_prefixes {
+            let expanded_prefix =
+                expand_bindings(&imports.bindings, prefix.clone(), &raw.evidence.expression)?;
+            let Resolution::Module(module) = self.resolve_segments(raw, &expanded_prefix) else {
+                continue;
+            };
+            if self.module_contains_name(&module, &segments[0]) {
+                let mut glob_expanded = expanded_prefix;
+                glob_expanded.extend_from_slice(segments);
+                return Ok(Some(glob_expanded));
             }
         }
-        candidate.extend(segments.iter().cloned());
+        Ok(None)
+    }
 
+    fn module_contains_name(&self, module_id: &str, name: &str) -> bool {
+        let Some(((target_root, relative), _)) = self
+            .module_paths
+            .iter()
+            .find(|(_, candidate)| candidate.as_str() == module_id)
+        else {
+            return false;
+        };
+        if self
+            .module_items
+            .get(&(target_root.clone(), relative.clone()))
+            .is_some_and(|items| items.contains(name))
+            || self
+                .module_imports
+                .get(&(target_root.clone(), relative.clone()))
+                .is_some_and(|imports| imports.bindings.contains_key(name))
+        {
+            return true;
+        }
+        let child = if relative.is_empty() {
+            name.to_owned()
+        } else {
+            format!("{relative}::{name}")
+        };
+        self.module_paths
+            .contains_key(&(target_root.clone(), child))
+    }
+
+    fn resolve_top_level_module(
+        &self,
+        raw: &RawDependency,
+        segments: &[String],
+    ) -> Option<ResolutionStep> {
+        self.module_paths
+            .contains_key(&(raw.target_root.clone(), segments[0].clone()))
+            .then(|| ResolutionStep::Search {
+                target_root: raw.target_root.clone(),
+                candidate: segments.to_vec(),
+            })
+    }
+
+    fn is_crate_root_item(&self, raw: &RawDependency, name: &str) -> bool {
+        self.module_items
+            .get(&(raw.target_root.clone(), String::new()))
+            .is_some_and(|items| items.contains(name))
+    }
+
+    fn resolve_explicit_path(
+        &self,
+        raw: &RawDependency,
+        segments: &[String],
+    ) -> Option<ResolutionStep> {
+        let mut candidate = raw.current_segments.clone();
+        let remaining = match segments[0].as_str() {
+            "crate" => {
+                candidate.clear();
+                &segments[1..]
+            }
+            "self" => &segments[1..],
+            "super" => {
+                let mut remaining = segments;
+                while remaining.first().is_some_and(|segment| segment == "super") {
+                    if candidate.pop().is_none() {
+                        return Some(ResolutionStep::Complete(Resolution::Unresolved(format!(
+                            "'{}' traverses beyond the crate root",
+                            raw.evidence.expression
+                        ))));
+                    }
+                    remaining = &remaining[1..];
+                }
+                remaining
+            }
+            _ => return None,
+        };
+        candidate.extend_from_slice(remaining);
+        Some(ResolutionStep::Search {
+            target_root: raw.target_root.clone(),
+            candidate,
+        })
+    }
+
+    fn resolve_current_module_scope(
+        &self,
+        raw: &RawDependency,
+        segments: &[String],
+    ) -> Option<ResolutionStep> {
+        let current_key = (raw.target_root.clone(), raw.current_segments.join("::"));
+        let mut child_segments = raw.current_segments.clone();
+        child_segments.push(segments[0].clone());
+        let child_key = (raw.target_root.clone(), child_segments.join("::"));
+        if self.module_paths.contains_key(&child_key) {
+            let mut candidate = raw.current_segments.clone();
+            candidate.extend_from_slice(segments);
+            return Some(ResolutionStep::Search {
+                target_root: raw.target_root.clone(),
+                candidate,
+            });
+        }
+        self.module_items
+            .get(&current_key)
+            .is_some_and(|items| items.contains(&segments[0]))
+            .then_some(ResolutionStep::Complete(Resolution::LocalItem))
+    }
+
+    fn resolve_crate_alias(
+        &self,
+        target: &TargetInfo,
+        segments: &[String],
+    ) -> Option<ResolutionStep> {
+        let first = &segments[0];
+        if let Some(target_root) = target.workspace_aliases.get(first) {
+            return Some(ResolutionStep::Search {
+                target_root: target_root.clone(),
+                candidate: segments[1..].to_vec(),
+            });
+        }
+        target
+            .external_aliases
+            .contains(first)
+            .then_some(ResolutionStep::Complete(Resolution::External))
+    }
+
+    fn finish_resolution(&self, resolution: ResolutionStep) -> Resolution {
+        let (target_root, candidate) = match resolution {
+            ResolutionStep::Search {
+                target_root,
+                candidate,
+            } => (target_root, candidate),
+            ResolutionStep::Complete(resolution) => return resolution,
+        };
         for length in (0..=candidate.len()).rev() {
             let relative = candidate[..length].join("::");
-            if let Some(module) = self.module_paths.get(&(target_root.to_owned(), relative)) {
+            if let Some(module) = self.module_paths.get(&(target_root.clone(), relative)) {
                 return Resolution::Module(module.clone());
             }
         }
-
         Resolution::LocalItem
     }
 
@@ -512,12 +790,29 @@ enum Resolution {
     Unresolved(String),
 }
 
+enum ResolutionStep {
+    Search {
+        target_root: String,
+        candidate: Vec<String>,
+    },
+    Complete(Resolution),
+}
+
+fn is_standard_crate(name: &str) -> bool {
+    STANDARD_CRATES.contains(&name)
+}
+
+fn is_standard_prelude_name(name: &str) -> bool {
+    STANDARD_PRELUDE_NAMES.contains(&name)
+}
+
 struct DependencyVisitor<'a> {
     source: &'a str,
     target_root: &'a str,
     current_segments: &'a [String],
     source_path: &'a str,
     strict: bool,
+    scoped_imports: Vec<BTreeMap<String, Vec<String>>>,
     dependencies: Vec<RawDependency>,
     diagnostics: BTreeSet<AnalysisDiagnostic>,
 }
@@ -536,6 +831,7 @@ impl<'a> DependencyVisitor<'a> {
             current_segments,
             source_path,
             strict,
+            scoped_imports: Vec::new(),
             dependencies: Vec::new(),
             diagnostics: BTreeSet::new(),
         }
@@ -545,6 +841,8 @@ impl<'a> DependencyVisitor<'a> {
         if segments.is_empty() {
             return;
         }
+        let expression = segments.join("::");
+        let segments = self.expand_scoped_imports(segments);
         self.dependencies.push(RawDependency {
             source: self.source.to_owned(),
             target_root: self.target_root.to_owned(),
@@ -552,11 +850,48 @@ impl<'a> DependencyVisitor<'a> {
             evidence: Evidence {
                 path: self.source_path.to_owned(),
                 line: span.start().line,
-                expression: segments.join("::"),
+                expression,
             },
             segments,
             origin,
         });
+    }
+
+    fn expand_scoped_imports(&self, mut segments: Vec<String>) -> Vec<String> {
+        let mut expanded = BTreeSet::new();
+        while let Some(first) = segments.first() {
+            let Some(imported) = self
+                .scoped_imports
+                .iter()
+                .rev()
+                .find_map(|scope| scope.get(first))
+            else {
+                break;
+            };
+            if !expanded.insert(first.clone()) {
+                break;
+            }
+            let mut replacement = imported.clone();
+            replacement.extend(segments.into_iter().skip(1));
+            segments = replacement;
+        }
+        segments
+    }
+
+    fn register_scoped_imports(&mut self, tree: &UseTree) {
+        if self.scoped_imports.is_empty() {
+            return;
+        }
+        let mut bindings = BTreeMap::new();
+        collect_use_bindings(tree, Vec::new(), &mut bindings);
+        let expanded = bindings
+            .into_iter()
+            .map(|(name, path)| (name, self.expand_scoped_imports(path)))
+            .collect::<Vec<_>>();
+        self.scoped_imports
+            .last_mut()
+            .expect("a scoped import frame exists")
+            .extend(expanded);
     }
 
     fn record_unsupported_macro(&mut self, node: &Macro, code: &str) {
@@ -581,6 +916,15 @@ impl<'ast> Visit<'ast> for DependencyVisitor<'_> {
         for path in paths {
             self.push_dependency(path, DependencyOrigin::Use, node.span());
         }
+        self.register_scoped_imports(&node.tree);
+    }
+
+    fn visit_block(&mut self, node: &'ast syn::Block) {
+        self.scoped_imports.push(BTreeMap::new());
+        visit::visit_block(self, node);
+        self.scoped_imports
+            .pop()
+            .expect("the scoped import frame was pushed");
     }
 
     fn visit_item_extern_crate(&mut self, node: &'ast ItemExternCrate) {
@@ -604,8 +948,13 @@ impl<'ast> Visit<'ast> for DependencyVisitor<'_> {
     }
 
     fn visit_item_macro(&mut self, node: &'ast ItemMacro) {
-        let name = path_segments(&node.mac.path).join("::");
-        if name == "include" {
+        if node
+            .mac
+            .path
+            .segments
+            .last()
+            .is_some_and(|segment| segment.ident == "include")
+        {
             self.record_unsupported_macro(&node.mac, "unsupported-include");
         } else if self.strict {
             self.record_unsupported_macro(&node.mac, "unsupported-item-macro");
@@ -613,7 +962,12 @@ impl<'ast> Visit<'ast> for DependencyVisitor<'_> {
     }
 
     fn visit_macro(&mut self, node: &'ast Macro) {
-        if path_segments(&node.path).join("::") == "include" {
+        if node
+            .path
+            .segments
+            .last()
+            .is_some_and(|segment| segment.ident == "include")
+        {
             self.record_unsupported_macro(node, "unsupported-include");
         }
         visit::visit_macro(self, node);
@@ -648,6 +1002,93 @@ fn flatten_use_tree(tree: &UseTree, prefix: Vec<String>, paths: &mut Vec<Vec<Str
     }
 }
 
+fn collect_use_bindings(
+    tree: &UseTree,
+    prefix: Vec<String>,
+    bindings: &mut BTreeMap<String, Vec<String>>,
+) {
+    match tree {
+        UseTree::Path(path) => {
+            let mut next = prefix;
+            next.push(path.ident.to_string());
+            collect_use_bindings(&path.tree, next, bindings);
+        }
+        UseTree::Name(name) => {
+            let mut path = prefix;
+            let binding = if name.ident == "self" {
+                let Some(binding) = path.last().cloned() else {
+                    return;
+                };
+                binding
+            } else {
+                let binding = name.ident.to_string();
+                path.push(binding.clone());
+                binding
+            };
+            if path.len() != 1 || path[0] != binding {
+                bindings.insert(binding, path);
+            }
+        }
+        UseTree::Rename(rename) => {
+            let mut path = prefix;
+            path.push(rename.ident.to_string());
+            bindings.insert(rename.rename.to_string(), path);
+        }
+        UseTree::Glob(_) => {}
+        UseTree::Group(group) => {
+            for item in &group.items {
+                collect_use_bindings(item, prefix.clone(), bindings);
+            }
+        }
+    }
+}
+
+fn collect_glob_prefixes(
+    tree: &UseTree,
+    prefix: Vec<String>,
+    prefixes: &mut BTreeSet<Vec<String>>,
+) {
+    match tree {
+        UseTree::Path(path) => {
+            let mut next = prefix;
+            next.push(path.ident.to_string());
+            collect_glob_prefixes(&path.tree, next, prefixes);
+        }
+        UseTree::Glob(_) => {
+            prefixes.insert(prefix);
+        }
+        UseTree::Group(group) => {
+            for item in &group.items {
+                collect_glob_prefixes(item, prefix.clone(), prefixes);
+            }
+        }
+        UseTree::Name(_) | UseTree::Rename(_) => {}
+    }
+}
+
+fn expand_bindings(
+    bindings: &BTreeMap<String, Vec<String>>,
+    mut segments: Vec<String>,
+    expression: &str,
+) -> Result<Vec<String>, String> {
+    let mut expanded = BTreeSet::new();
+    while let Some(first) = segments.first() {
+        if matches!(first.as_str(), "crate" | "self" | "super") {
+            break;
+        }
+        let Some(imported) = bindings.get(first) else {
+            break;
+        };
+        if !expanded.insert(first.clone()) {
+            return Err(format!("import '{expression}' contains a cyclic alias"));
+        }
+        let mut replacement = imported.clone();
+        replacement.extend(segments.into_iter().skip(1));
+        segments = replacement;
+    }
+    Ok(segments)
+}
+
 fn path_segments(path: &SynPath) -> Vec<String> {
     path.segments
         .iter()
@@ -680,14 +1121,17 @@ fn item_name(item: &Item) -> Option<String> {
 fn resolve_module_file(
     declaring_source: &Path,
     module_dir: &Path,
+    inside_inline_module: bool,
     name: &str,
     attributes: &[Attribute],
 ) -> Result<(PathBuf, PathBuf), String> {
     if let Some(custom_path) = module_path_attribute(attributes)? {
-        let source = declaring_source
-            .parent()
-            .unwrap_or(module_dir)
-            .join(&custom_path);
+        let base = if inside_inline_module {
+            module_dir
+        } else {
+            declaring_source.parent().unwrap_or(module_dir)
+        };
+        let source = base.join(&custom_path);
         if !source.is_file() {
             return Err(format!(
                 "module '{name}' points to missing #[path] file '{}'",

@@ -175,7 +175,6 @@ dependencies = [
  "serde",
  "serde_json",
  "syn",
- "thiserror",
  "toml",
 ]
 

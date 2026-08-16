@@ -4,6 +4,8 @@
   "outcome": "violations",
   "summary": {
     "modules": 3,
+    "classified_modules": 2,
+    "unclassified_modules": 1,
     "dependencies": 1,
     "violations": 1,
     "analysis_errors": 0

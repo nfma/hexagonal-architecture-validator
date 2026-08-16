@@ -39,7 +39,9 @@ paths = ["^src/domain/"]        # optional Rust regular expressions
 Role and rule IDs match `^[a-z][a-z0-9-]*$`. At least one `modules` or `paths`
 pattern is required. A module may have multiple roles; matching any configured
 pattern assigns the role. Unclassified modules remain in the graph but do not
-match role rules.
+match role rules. Role regexes use unanchored matching unless the pattern
+includes anchors such as `^` and `$`; anchor patterns when substring matches
+would classify unintended modules or paths.
 
 Module IDs are stable strings of the form:
 
@@ -79,7 +81,14 @@ For each dependency edge, `hav`:
 
 Allowed rules are exceptions, not a global allowlist. Give exception roles
 narrow path or module patterns. Rule IDs are globally unique across forbidden,
-allowed, and preset rules.
+allowed, and preset rules. When modules have overlapping roles, any allowed rule
+matching the source and target role sets suppresses every forbidden rule for
+that same edge.
+
+In JSON, a `forbidden-dependency` finding includes `target` and `evidence` and
+omits `cycle`. A `cycle` finding includes the sorted `cycle` members and omits
+`target` and `evidence`. The common fields `rule_id`, `kind`, `message`, and
+`source` are always present.
 
 ## Hexagonal preset
 

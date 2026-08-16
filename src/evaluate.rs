@@ -1,7 +1,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::config::{LoadedConfig, classify_modules};
-use crate::model::{DependencyGraph, Finding, FindingKind, Outcome, Summary, ValidationReport};
+use crate::model::{
+    DependencyGraph, Finding, FindingKind, Outcome, SCHEMA_VERSION, Summary, ValidationReport,
+};
 
 const LIMITATIONS: [&str; 4] = [
     "cfg predicates are not evaluated; all syntactically present branches are analyzed",
@@ -10,7 +12,7 @@ const LIMITATIONS: [&str; 4] = [
     "a passing result is evidence for declared static boundaries, not proof of architectural quality",
 ];
 
-pub fn evaluate(graph: DependencyGraph, config: &LoadedConfig) -> ValidationReport {
+pub fn evaluate(mut graph: DependencyGraph, config: &LoadedConfig) -> ValidationReport {
     let classifications = classify_modules(
         config,
         graph.modules.values().map(|module| {
@@ -21,6 +23,21 @@ pub fn evaluate(graph: DependencyGraph, config: &LoadedConfig) -> ValidationRepo
             )
         }),
     );
+    let classified_modules = classifications
+        .values()
+        .filter(|roles| !roles.is_empty())
+        .count();
+    let unclassified_modules = classifications.len() - classified_modules;
+    if classified_modules == 0 {
+        graph.diagnostics.insert(crate::model::AnalysisDiagnostic {
+            code: "no-classified-modules".to_owned(),
+            message:
+                "no analyzed modules match any configured role; check role module and path patterns"
+                    .to_owned(),
+            path: None,
+            line: None,
+        });
+    }
     let mut findings = evaluate_rules(&graph, config, &classifications);
     if config.analysis.detect_cycles {
         findings.extend(cycle_findings(&graph));
@@ -39,13 +56,15 @@ pub fn evaluate(graph: DependencyGraph, config: &LoadedConfig) -> ValidationRepo
     };
     let summary = Summary {
         modules: modules.len(),
+        classified_modules,
+        unclassified_modules,
         dependencies: dependencies.len(),
         violations: findings.len(),
         analysis_errors: analysis_errors.len(),
     };
 
     ValidationReport {
-        schema_version: 1,
+        schema_version: SCHEMA_VERSION,
         tool_version: env!("CARGO_PKG_VERSION"),
         outcome,
         summary,

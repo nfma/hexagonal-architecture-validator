@@ -35,7 +35,7 @@ struct CheckArgs {
     #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
     format: OutputFormat,
 
-    /// Fail on module-level macros that cannot be expanded.
+    /// Fail on item-position macros that cannot be expanded.
     #[arg(long)]
     strict: bool,
 }
@@ -67,21 +67,7 @@ fn check(args: CheckArgs) -> ExitCode {
     ) {
         Ok(report) => report,
         Err(error) => {
-            let message = format!("{error:#}");
-            match args.format {
-                OutputFormat::Text => {
-                    eprintln!("configuration or analysis error: {message}");
-                }
-                OutputFormat::Json => {
-                    match hexagonal_architecture_validator::report::render_error_json(&message) {
-                        Ok(output) => print!("{output}"),
-                        Err(render_error) => {
-                            eprintln!("could not render error report: {render_error:#}");
-                        }
-                    }
-                }
-            }
-            return ExitCode::from(2);
+            hexagonal_architecture_validator::report::analysis_failure_report(&format!("{error:#}"))
         }
     };
 

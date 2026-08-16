@@ -25,6 +25,10 @@ Machine-readable output is stable and versioned:
 hav check --root . --format json
 ```
 
+JSON always uses the same `ValidationReport` document, including configuration
+and discovery failures. Its `outcome` is exactly `passed`, `violations`, or
+`analysis-failure`. Text reports for all three outcomes are written to stdout.
+
 Exit codes are part of the CLI contract:
 
 | Code | Meaning |
@@ -48,13 +52,14 @@ preset = "hexagonal"
 strict = true
 detect_cycles = true
 
+# Paths are relative to the Cargo workspace root.
 [[roles]]
 id = "core"
-paths = ["^src/core(?:/|\\.rs$)"]
+paths = ["^(?:crates/[^/]+/)?src/core(?:/|\\.rs$)"]
 
 [[roles]]
 id = "adapter"
-paths = ["^src/adapters(?:/|\\.rs$)"]
+paths = ["^(?:crates/[^/]+/)?src/adapters(?:/|\\.rs$)"]
 ```
 
 See [Configuration](docs/CONFIGURATION.md) for the complete schema and preset
@@ -62,15 +67,18 @@ contract.
 
 ## Analysis model
 
-`hav` invokes `cargo metadata --format-version 1 --no-deps --offline`, excludes
+`hav` invokes `cargo metadata --format-version 1 --no-deps --offline` for
+`--root/Cargo.toml` unless `--manifest-path` is supplied, excludes
 custom build-script targets, parses Rust source with `syn`, discovers file and
 inline modules, and resolves local plus workspace-crate imports. Findings,
 paths, modules, edges, and diagnostics are sorted deterministically.
 
 Macro expansion and cfg evaluation are deliberately outside the first release.
 `include!` is an analysis error; `--strict` also makes item-position macro
-invocations analysis errors. All reports list the remaining false-positive and
-false-negative risks. See [Analysis and limitations](docs/ANALYSIS.md).
+invocations analysis errors. JSON reports that reach rule evaluation list the
+remaining false-positive and false-negative risks. Text reports do not render
+these limitations, and failures returned before evaluation use an empty JSON
+limitations list. See [Analysis and limitations](docs/ANALYSIS.md).
 
 ## Development
 
