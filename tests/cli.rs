@@ -544,6 +544,35 @@ fn local_type_names_take_precedence_over_workspace_crates() {
 }
 
 #[test]
+fn lexical_type_names_take_precedence_over_workspace_crates() {
+    for (name, source) in [
+        (
+            "workspace-generic-type-shadow",
+            "pub trait Marker { type helper; }\n#[allow(non_camel_case_types)]\npub fn call<domain: Marker>(_: domain::helper) {}\n",
+        ),
+        (
+            "workspace-block-type-shadow",
+            "pub fn call() {\n    #[allow(non_camel_case_types)]\n    struct domain;\n    impl domain { fn helper() {} }\n    domain::helper();\n}\n",
+        ),
+    ] {
+        let project = workspace_shadow_project(name, source);
+        let cargo = project.cargo_check();
+        assert!(
+            cargo.status.success(),
+            "{name} must compile with cargo: {}",
+            String::from_utf8_lossy(&cargo.stderr)
+        );
+        let output = project.run("text");
+        assert_eq!(
+            output.status.code(),
+            Some(0),
+            "{name} must not become a workspace dependency: {}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+    }
+}
+
+#[test]
 fn opaque_reexports_consider_the_intermediate_modules_role() {
     let config = "version = 1\n\n[[roles]]\nid = \"core\"\nmodules = [\"::core(?:$|::)\"]\n\n[[roles]]\nid = \"adapter\"\nmodules = [\"::adapters(?:$|::)\"]\n\n[[forbidden]]\nid = \"core-no-adapter\"\nfrom = [\"core\"]\nto = [\"adapter\"]\n";
     let source = "pub mod adapters { pub mod http { pub use crate::core::model::Order; pub struct Handler; } }\npub mod core { pub mod model { pub struct Order; } pub mod service { use crate::adapters::http::Order; pub fn run(_: Order) {} } }\n";

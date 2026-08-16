@@ -1151,6 +1151,7 @@ struct DependencyVisitor<'a> {
     current_segments: &'a [String],
     source_path: &'a str,
     strict: bool,
+    lexical_type_scopes: Vec<BTreeSet<String>>,
     dependencies: Vec<RawDependency>,
     diagnostics: BTreeSet<AnalysisDiagnostic>,
 }
@@ -1169,9 +1170,39 @@ impl<'a> DependencyVisitor<'a> {
             current_segments,
             source_path,
             strict,
+            lexical_type_scopes: Vec::new(),
             dependencies: Vec::new(),
             diagnostics: BTreeSet::new(),
         }
+    }
+
+    fn push_generic_scope(&mut self, generics: &syn::Generics) {
+        self.lexical_type_scopes.push(
+            generics
+                .params
+                .iter()
+                .filter_map(|parameter| match parameter {
+                    syn::GenericParam::Type(parameter) => Some(parameter.ident.to_string()),
+                    syn::GenericParam::Lifetime(_) | syn::GenericParam::Const(_) => None,
+                })
+                .collect(),
+        );
+    }
+
+    fn pop_type_scope(&mut self) {
+        self.lexical_type_scopes
+            .pop()
+            .expect("type scope pushes and pops must remain balanced");
+    }
+
+    fn has_lexical_type_root(&self, path: &SynPath) -> bool {
+        path.leading_colon.is_none()
+            && path.segments.first().is_some_and(|segment| {
+                self.lexical_type_scopes
+                    .iter()
+                    .rev()
+                    .any(|scope| scope.contains(&segment.ident.to_string()))
+            })
     }
 
     fn push_dependency(
@@ -1226,7 +1257,99 @@ impl<'a> DependencyVisitor<'a> {
 }
 
 impl<'ast> Visit<'ast> for DependencyVisitor<'_> {
+    fn visit_block(&mut self, node: &'ast syn::Block) {
+        self.lexical_type_scopes.push(
+            node.stmts
+                .iter()
+                .filter_map(|statement| match statement {
+                    syn::Stmt::Item(item) => type_item_name(item),
+                    syn::Stmt::Local(_) | syn::Stmt::Expr(_, _) | syn::Stmt::Macro(_) => None,
+                })
+                .collect(),
+        );
+        visit::visit_block(self, node);
+        self.pop_type_scope();
+    }
+
+    fn visit_foreign_item_fn(&mut self, node: &'ast syn::ForeignItemFn) {
+        self.push_generic_scope(&node.sig.generics);
+        visit::visit_foreign_item_fn(self, node);
+        self.pop_type_scope();
+    }
+
+    fn visit_impl_item_fn(&mut self, node: &'ast syn::ImplItemFn) {
+        self.push_generic_scope(&node.sig.generics);
+        visit::visit_impl_item_fn(self, node);
+        self.pop_type_scope();
+    }
+
+    fn visit_impl_item_type(&mut self, node: &'ast syn::ImplItemType) {
+        self.push_generic_scope(&node.generics);
+        visit::visit_impl_item_type(self, node);
+        self.pop_type_scope();
+    }
+
+    fn visit_item_enum(&mut self, node: &'ast syn::ItemEnum) {
+        self.push_generic_scope(&node.generics);
+        visit::visit_item_enum(self, node);
+        self.pop_type_scope();
+    }
+
+    fn visit_item_fn(&mut self, node: &'ast syn::ItemFn) {
+        self.push_generic_scope(&node.sig.generics);
+        visit::visit_item_fn(self, node);
+        self.pop_type_scope();
+    }
+
+    fn visit_item_impl(&mut self, node: &'ast syn::ItemImpl) {
+        self.push_generic_scope(&node.generics);
+        visit::visit_item_impl(self, node);
+        self.pop_type_scope();
+    }
+
     fn visit_item_mod(&mut self, _node: &'ast syn::ItemMod) {}
+
+    fn visit_item_struct(&mut self, node: &'ast syn::ItemStruct) {
+        self.push_generic_scope(&node.generics);
+        visit::visit_item_struct(self, node);
+        self.pop_type_scope();
+    }
+
+    fn visit_item_trait(&mut self, node: &'ast syn::ItemTrait) {
+        self.push_generic_scope(&node.generics);
+        visit::visit_item_trait(self, node);
+        self.pop_type_scope();
+    }
+
+    fn visit_item_trait_alias(&mut self, node: &'ast syn::ItemTraitAlias) {
+        self.push_generic_scope(&node.generics);
+        visit::visit_item_trait_alias(self, node);
+        self.pop_type_scope();
+    }
+
+    fn visit_item_type(&mut self, node: &'ast syn::ItemType) {
+        self.push_generic_scope(&node.generics);
+        visit::visit_item_type(self, node);
+        self.pop_type_scope();
+    }
+
+    fn visit_item_union(&mut self, node: &'ast syn::ItemUnion) {
+        self.push_generic_scope(&node.generics);
+        visit::visit_item_union(self, node);
+        self.pop_type_scope();
+    }
+
+    fn visit_trait_item_fn(&mut self, node: &'ast syn::TraitItemFn) {
+        self.push_generic_scope(&node.sig.generics);
+        visit::visit_trait_item_fn(self, node);
+        self.pop_type_scope();
+    }
+
+    fn visit_trait_item_type(&mut self, node: &'ast syn::TraitItemType) {
+        self.push_generic_scope(&node.generics);
+        visit::visit_trait_item_type(self, node);
+        self.pop_type_scope();
+    }
 
     fn visit_item_use(&mut self, node: &'ast ItemUse) {
         let is_public = !matches!(node.vis, Visibility::Inherited);
@@ -1282,10 +1405,11 @@ impl<'ast> Visit<'ast> for DependencyVisitor<'_> {
 
     fn visit_path(&mut self, node: &'ast SynPath) {
         let segments = path_segments(node);
-        if segments.len() > 1
-            || segments
-                .first()
-                .is_some_and(|segment| matches!(segment.as_str(), "crate" | "self" | "super"))
+        if !self.has_lexical_type_root(node)
+            && (segments.len() > 1
+                || segments
+                    .first()
+                    .is_some_and(|segment| matches!(segment.as_str(), "crate" | "self" | "super")))
         {
             self.push_dependency(
                 DependencyPath {
