@@ -99,9 +99,10 @@ use the full JSON report shape with an empty `limitations` list.
 
 | Code | Meaning |
 | --- | --- |
+| `configuration-or-analysis-error` | Configuration loading or another top-level analysis failure prevented evaluation. |
 | `cfg-ambiguous-module` | Repeated declarations of one module resolve to different canonical files. |
 | `module-outside-workspace` | A module source resolves outside the canonical Cargo workspace root. |
-| `opaque-reexport` | A cross-role dependency terminates at a re-export that v0.1 cannot follow completely. |
+| `opaque-reexport` | A dependency route through a public re-export could cross a configured forbidden rule that v0.1 cannot follow completely. |
 | `parse-failed` | A discovered Rust source file cannot be parsed by `syn`. |
 | `recursive-module-source` | A module recursively resolves to a canonical source already being inspected. |
 | `role-matched-no-modules` | A declared role matches no discovered module. |

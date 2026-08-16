@@ -1532,14 +1532,32 @@ fn item_name(item: &Item) -> Option<String> {
 
 fn type_item_name(item: &Item) -> Option<String> {
     match item {
-        Item::Enum(item) => Some(item.ident.to_string()),
-        Item::Struct(item) => Some(item.ident.to_string()),
-        Item::Trait(item) => Some(item.ident.to_string()),
-        Item::TraitAlias(item) => Some(item.ident.to_string()),
-        Item::Type(item) => Some(item.ident.to_string()),
-        Item::Union(item) => Some(item.ident.to_string()),
+        Item::Enum(item) if !has_conditional_compilation(&item.attrs) => {
+            Some(item.ident.to_string())
+        }
+        Item::Struct(item) if !has_conditional_compilation(&item.attrs) => {
+            Some(item.ident.to_string())
+        }
+        Item::Trait(item) if !has_conditional_compilation(&item.attrs) => {
+            Some(item.ident.to_string())
+        }
+        Item::TraitAlias(item) if !has_conditional_compilation(&item.attrs) => {
+            Some(item.ident.to_string())
+        }
+        Item::Type(item) if !has_conditional_compilation(&item.attrs) => {
+            Some(item.ident.to_string())
+        }
+        Item::Union(item) if !has_conditional_compilation(&item.attrs) => {
+            Some(item.ident.to_string())
+        }
         _ => None,
     }
+}
+
+fn has_conditional_compilation(attributes: &[Attribute]) -> bool {
+    attributes
+        .iter()
+        .any(|attribute| attribute.path().is_ident("cfg") || attribute.path().is_ident("cfg_attr"))
 }
 
 fn resolve_module_file(

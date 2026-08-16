@@ -544,6 +544,37 @@ fn local_type_names_take_precedence_over_workspace_crates() {
 }
 
 #[test]
+fn cfg_gated_type_names_do_not_hide_workspace_crates() {
+    for (name, attribute) in [
+        ("workspace-cfg-test-shadow", "#[cfg(test)]"),
+        ("workspace-cfg-any-shadow", "#[cfg(any())]"),
+    ] {
+        let source = format!(
+            "{attribute}\n#[allow(non_camel_case_types)]\npub struct domain;\npub fn consume(_: domain::FromDep) {{}}\n"
+        );
+        let project = workspace_shadow_project(name, &source);
+        project.write("domain/src/lib.rs", "pub struct FromDep;\n");
+        project.write(
+            "hav.toml",
+            "version = 1\n\n[[roles]]\nid = \"core\"\nmodules = [\"::core$\"]\n\n[[roles]]\nid = \"adapter\"\nmodules = ['^domain::lib\\(domain\\)$']\n\n[[forbidden]]\nid = \"core-no-adapter\"\nfrom = [\"core\"]\nto = [\"adapter\"]\n",
+        );
+        let cargo = project.cargo_check();
+        assert!(
+            cargo.status.success(),
+            "{name} must bind the workspace crate: {}",
+            String::from_utf8_lossy(&cargo.stderr)
+        );
+        let output = project.run("text");
+        assert_eq!(output.status.code(), Some(1), "{name} must violate");
+        assert!(
+            String::from_utf8(output.stdout)
+                .unwrap()
+                .contains("error[core-no-adapter]")
+        );
+    }
+}
+
+#[test]
 fn lexical_type_names_take_precedence_over_workspace_crates() {
     for (name, source) in [
         (
@@ -1180,6 +1211,19 @@ fn applied_exemptions_are_narrow_auditable_and_preserve_exit_contracts() {
     let stdout = String::from_utf8(output.stdout).unwrap();
     assert!(stdout.contains("error[second-core-rule]"));
     assert!(stdout.contains("allowed[narrow-exception] exempted forbidden[core-rule]"));
+
+    let analysis_failure = ScratchProject::basic(
+        "exempt-with-analysis-error",
+        &format!("{source}std::include!(\"generated.rs\");\n"),
+        &one_rule,
+    );
+    analysis_failure.write("src/generated.rs", "pub struct Generated;\n");
+    assert!(analysis_failure.rustc().status.success());
+    let output = analysis_failure.run("text");
+    assert_eq!(output.status.code(), Some(2));
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("error[unsupported-include]"));
+    assert!(stdout.contains("allowed[narrow-exception] exempted forbidden[core-rule]"));
 }
 
 #[test]
@@ -1611,8 +1655,22 @@ fn documentation_limits_where_analysis_limitations_are_reported() {
     assert!(analysis.contains("reach evaluation include this list in JSON output"));
     assert!(!readme.contains("All reports list the remaining"));
     assert!(!analysis.contains("listed in every JSON report"));
+    assert!(analysis.contains("| `configuration-or-analysis-error` |"));
+    assert!(analysis.contains(
+        "A dependency route through a public re-export could cross a configured forbidden rule"
+    ));
 
     let text_output = run("compliant", "text");
     let stdout = String::from_utf8(text_output.stdout).unwrap();
     assert!(!stdout.contains("cfg predicates are not evaluated"));
+
+    let json_output = run("compliant", "json");
+    let report = json_report(&json_output);
+    let limitations = report["limitations"].as_array().unwrap();
+    assert!(limitations.iter().any(|limitation| {
+        limitation.as_str().is_some_and(|text| {
+            text.contains("when a configured forbidden rule matches")
+                && text.contains("full pub-use graph is not followed")
+        })
+    }));
 }

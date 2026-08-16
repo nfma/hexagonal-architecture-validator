@@ -55,21 +55,19 @@ pub fn render_text(report: &ValidationReport) -> String {
             }
         }
     }
-    if matches!(report.outcome, Outcome::Passed | Outcome::Violations) {
-        for exemption in &report.exemptions {
-            writeln!(
-                output,
-                "allowed[{}] exempted forbidden[{}] {} -> {} at {}:{} ({})",
-                exemption.allowed_rule_id,
-                exemption.forbidden_rule_id,
-                exemption.source,
-                exemption.target,
-                exemption.evidence.path,
-                exemption.evidence.line,
-                exemption.evidence.expression
-            )
-            .expect("writing to a String cannot fail");
-        }
+    for exemption in &report.exemptions {
+        writeln!(
+            output,
+            "allowed[{}] exempted forbidden[{}] {} -> {} at {}:{} ({})",
+            exemption.allowed_rule_id,
+            exemption.forbidden_rule_id,
+            exemption.source,
+            exemption.target,
+            exemption.evidence.path,
+            exemption.evidence.line,
+            exemption.evidence.expression
+        )
+        .expect("writing to a String cannot fail");
     }
     output
 }

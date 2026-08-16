@@ -9,7 +9,7 @@ use crate::model::{
 const LIMITATIONS: [&str; 5] = [
     "cfg predicates are not evaluated; repeated same-source bodies are all analyzed, differing files fail, and conditional path attributes fail closed",
     "procedural and declarative macros are not expanded",
-    "cross-role dependencies through public re-exports fail closed; the full pub-use graph is not followed",
+    "public re-export routes fail closed when a configured forbidden rule matches the source to the re-export or resolved target; the full pub-use graph is not followed",
     "method calls, dynamic dispatch, and runtime relationships do not create dependency edges",
     "a passing result is evidence for declared static boundaries, not proof of architectural quality",
 ];
