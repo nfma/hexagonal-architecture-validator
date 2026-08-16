@@ -48,6 +48,16 @@ jobs:
           cp "target/${TARGET}/release/hav" dist/package/hav
           cp README.md LICENSE dist/package/
           tar -C dist/package -czf "dist/${artifact}" hav README.md LICENSE
+      - name: Smoke-test packaged binary
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          artifact="dist/hexagonal-architecture-validator-${GITHUB_REF_NAME}-${TARGET}.tar.gz"
+          smoke_dir="$(mktemp -d)"
+          tar -C "${smoke_dir}" -xzf "${artifact}"
+          "${smoke_dir}/hav" --version
+          "${smoke_dir}/hav" check --root "${GITHUB_WORKSPACE}" --config hav.toml --format json > /dev/null
       - name: Upload release archive
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:

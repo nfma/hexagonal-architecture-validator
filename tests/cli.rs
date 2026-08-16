@@ -92,6 +92,10 @@ fn single_role_config() -> &'static str {
     "version = 1\n\n[[roles]]\nid = \"module\"\npaths = [\"^src/\"]\n"
 }
 
+fn core_adapter_config() -> &'static str {
+    "version = 1\n\n[[roles]]\nid = \"core\"\nmodules = [\"::core$\"]\n\n[[roles]]\nid = \"adapter\"\nmodules = [\"::adapter$\"]\n\n[[forbidden]]\nid = \"core-no-adapter\"\nfrom = [\"core\"]\nto = [\"adapter\"]\n"
+}
+
 fn fixture(name: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests/fixtures")
@@ -496,6 +500,170 @@ fn repeated_inline_module_bodies_are_all_analyzed() {
         let stdout = String::from_utf8(output.stdout).unwrap();
         assert_eq!(stdout.matches("error[core-no-adapter]").count(), 1);
     }
+}
+
+#[cfg(unix)]
+#[test]
+fn conditional_module_path_attributes_fail_closed() {
+    let project = ScratchProject::basic(
+        "conditional-module-path",
+        "pub mod adapter { pub struct Driver; }\n#[cfg_attr(unix, path = \"active_core.rs\")]\npub mod core;\n",
+        core_adapter_config(),
+    );
+    project.write(
+        "src/active_core.rs",
+        "use crate::adapter::Driver; pub fn run(_: Driver) {}\n",
+    );
+    project.write(
+        "src/core.rs",
+        "compile_error!(\"rustc must not select the default module file\");\n",
+    );
+    assert!(
+        project.rustc().status.success(),
+        "rustc must select the conditional path"
+    );
+    let output = project.run("text");
+    assert_eq!(output.status.code(), Some(2));
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("error[unresolved-module]"));
+    assert!(stdout.contains("conditional #[cfg_attr(..., path = ...)]"));
+}
+
+#[test]
+fn nested_path_attributes_are_relative_to_the_declaring_file() {
+    let config = "version = 1\n\n[[roles]]\nid = \"core\"\nmodules = [\"::application::console$\"]\n\n[[roles]]\nid = \"adapter\"\nmodules = [\"::adapter$\"]\n\n[[forbidden]]\nid = \"core-no-adapter\"\nfrom = [\"core\"]\nto = [\"adapter\"]\n";
+    let project = ScratchProject::basic(
+        "nested-path-base",
+        "pub mod adapter { pub struct Driver; }\npub mod application;\n",
+        config,
+    );
+    project.write(
+        "src/application.rs",
+        "#[path = \"adapters/console.rs\"] pub mod console;\n",
+    );
+    project.write(
+        "src/adapters/console.rs",
+        "use crate::adapter::Driver; pub fn run(_: Driver) {}\n",
+    );
+    project.write(
+        "src/application/adapters/console.rs",
+        "compile_error!(\"rustc must resolve #[path] from the declaring file\");\n",
+    );
+    assert!(
+        project.rustc().status.success(),
+        "fixture must compile with rustc"
+    );
+    let output = project.run("text");
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert_eq!(output.status.code(), Some(1), "{stdout}");
+    assert!(stdout.contains("error[core-no-adapter]"));
+}
+
+#[test]
+fn module_relative_paths_and_imports_create_dependency_edges() {
+    for (name, body) in [
+        (
+            "module-relative-path",
+            "pub fn run(_: adapter::Concrete) {}",
+        ),
+        (
+            "module-relative-use",
+            "use adapter::Concrete; pub fn run(_: Concrete) {}",
+        ),
+    ] {
+        let source =
+            format!("pub mod core {{ pub mod adapter {{ pub struct Concrete; }} {body} }}\n");
+        let config = "version = 1\n\n[[roles]]\nid = \"core\"\nmodules = [\"::core$\"]\n\n[[roles]]\nid = \"adapter\"\nmodules = [\"::core::adapter$\"]\n\n[[forbidden]]\nid = \"core-no-adapter\"\nfrom = [\"core\"]\nto = [\"adapter\"]\n";
+        let project = ScratchProject::basic(name, &source, config);
+        assert!(
+            project.rustc().status.success(),
+            "{name} must compile with rustc"
+        );
+        let output = project.run("text");
+        let stdout = String::from_utf8(output.stdout).unwrap();
+        assert_eq!(
+            output.status.code(),
+            Some(1),
+            "{name} must violate: {stdout}"
+        );
+        assert!(stdout.contains("error[core-no-adapter]"));
+    }
+}
+
+#[test]
+fn public_reexports_fail_closed_when_role_sets_are_equal() {
+    let config = "version = 1\n\n[[roles]]\nid = \"layer\"\npaths = [\"^src/\"]\n\n[[forbidden]]\nid = \"no-layer-dependencies\"\nfrom = [\"layer\"]\nto = [\"layer\"]\n";
+    let project = ScratchProject::basic(
+        "equal-role-reexport",
+        "pub mod adapter { pub struct Driver; }\npub mod api { pub use crate::adapter::Driver; }\npub mod core { use crate::api::Driver; pub fn run(_: Driver) {} }\n",
+        config,
+    );
+    assert!(
+        project.rustc().status.success(),
+        "fixture must compile with rustc"
+    );
+    let output = project.run("text");
+    assert_eq!(output.status.code(), Some(2));
+    assert!(
+        String::from_utf8(output.stdout)
+            .unwrap()
+            .contains("error[opaque-reexport]")
+    );
+}
+
+#[test]
+fn extern_crate_self_and_private_alias_chains_keep_terminal_targets() {
+    let extern_alias = ScratchProject::basic(
+        "extern-self-alias",
+        "extern crate self as aliased;\npub mod adapter { pub struct Concrete; }\npub mod core { pub fn run(_: aliased::adapter::Concrete) {} }\n",
+        core_adapter_config(),
+    );
+    assert!(
+        extern_alias.rustc().status.success(),
+        "extern crate self alias must compile with rustc"
+    );
+    let output = extern_alias.run("text");
+    assert_eq!(output.status.code(), Some(1));
+    assert!(
+        String::from_utf8(output.stdout)
+            .unwrap()
+            .contains("error[core-no-adapter]")
+    );
+
+    let private_chain = ScratchProject::basic(
+        "private-alias-chain",
+        "pub mod adapter { pub struct Concrete; }\npub mod aliases { use crate::adapter as hidden; use self::hidden as second; pub mod core { pub fn run(_: super::second::Concrete) {} } }\n",
+        core_adapter_config(),
+    );
+    assert!(
+        private_chain.rustc().status.success(),
+        "private ancestor alias chain must compile with rustc"
+    );
+    let output = private_chain.run("text");
+    assert_eq!(output.status.code(), Some(1));
+    assert!(
+        String::from_utf8(output.stdout)
+            .unwrap()
+            .contains("error[core-no-adapter]")
+    );
+}
+
+#[test]
+fn malformed_root_self_use_is_diagnostic_not_a_panic() {
+    let project = ScratchProject::basic(
+        "root-self-use",
+        "use {self};\npub fn run() {}\n",
+        single_role_config(),
+    );
+    assert!(
+        !project.rustc().status.success(),
+        "negative control must be rejected by rustc"
+    );
+    let output = project.run("text");
+    assert_eq!(output.status.code(), Some(2));
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("error[unresolved-import]"));
+    assert!(!stdout.contains("panicked"));
 }
 
 #[test]

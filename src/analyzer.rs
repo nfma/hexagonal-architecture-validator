@@ -5,11 +5,12 @@ use std::path::{Component, Path, PathBuf};
 use anyhow::{Context, bail};
 use cargo_metadata::{MetadataCommand, Package, Target};
 use proc_macro2::Span;
+use syn::parse::Parser;
+use syn::punctuated::Punctuated;
 use syn::spanned::Spanned;
 use syn::visit::{self, Visit};
 use syn::{
-    Attribute, Item, ItemExternCrate, ItemMacro, ItemUse, Macro, Path as SynPath, UseTree,
-    Visibility,
+    Attribute, Item, ItemMacro, ItemUse, Macro, Meta, Path as SynPath, Token, UseTree, Visibility,
 };
 
 use crate::model::{
@@ -47,7 +48,9 @@ struct RawDependency {
     current_segments: Vec<String>,
     segments: Vec<String>,
     origin: DependencyOrigin,
-    reexported_name: Option<String>,
+    imported_name: Option<String>,
+    public_import: bool,
+    global_import: bool,
     evidence: Evidence,
 }
 
@@ -57,6 +60,31 @@ struct UseImport {
     exposed_name: String,
 }
 
+#[derive(Debug, Clone, Eq, PartialEq, Ord, PartialOrd)]
+struct ImportTarget {
+    module: String,
+    exact_module: bool,
+}
+
+#[derive(Debug, Clone, Default, Eq, PartialEq)]
+struct ImportBinding {
+    targets: BTreeSet<ImportTarget>,
+    external: bool,
+    local: bool,
+    global: bool,
+    opaque_routes: BTreeSet<(String, String)>,
+}
+
+impl ImportBinding {
+    fn merge(&mut self, other: Self) {
+        self.targets.extend(other.targets);
+        self.external |= other.external;
+        self.local |= other.local;
+        self.global |= other.global;
+        self.opaque_routes.extend(other.opaque_routes);
+    }
+}
+
 struct Analyzer {
     workspace_root: PathBuf,
     strict: bool,
@@ -64,6 +92,7 @@ struct Analyzer {
     graph: DependencyGraph,
     raw_dependencies: Vec<RawDependency>,
     module_paths: BTreeMap<(String, String), String>,
+    module_locations: BTreeMap<String, (String, Vec<String>)>,
     module_items: BTreeMap<(String, String), BTreeSet<String>>,
     module_sources: BTreeMap<String, PathBuf>,
     active_sources: BTreeSet<PathBuf>,
@@ -112,6 +141,7 @@ pub fn analyze(options: AnalysisOptions<'_>) -> anyhow::Result<DependencyGraph> 
         graph: DependencyGraph::default(),
         raw_dependencies: Vec::new(),
         module_paths: BTreeMap::new(),
+        module_locations: BTreeMap::new(),
         module_items: BTreeMap::new(),
         module_sources: BTreeMap::new(),
         active_sources: BTreeSet::new(),
@@ -344,10 +374,10 @@ impl Analyzer {
         self.register_module(target, &segments, &canonical_source);
         let result = self.inspect_items(
             target,
-            &module_id,
             &segments,
             &canonical_source,
             module_dir,
+            canonical_source.parent().unwrap_or(module_dir),
             &file.items,
         );
         self.active_sources.remove(&canonical_source);
@@ -357,16 +387,17 @@ impl Analyzer {
     fn inspect_items(
         &mut self,
         target: &TargetInfo,
-        current_module_id: &str,
         segments: &[String],
         source: &Path,
         module_dir: &Path,
+        path_attribute_base: &Path,
         items: &[Item],
     ) -> anyhow::Result<()> {
         self.register_items(target, segments, items);
+        let current_module_id = module_id(&target.root_id, segments);
         let source_normalized = self.normalize_path(source);
         let mut visitor = DependencyVisitor::new(
-            current_module_id,
+            &current_module_id,
             &target.root_id,
             segments,
             &source_normalized,
@@ -420,9 +451,9 @@ impl Analyzer {
                 };
                 self.inspect_items(
                     target,
-                    &child_id,
                     &child_segments,
                     source,
+                    &child_dir,
                     &child_dir,
                     inline_items,
                 )?;
@@ -430,7 +461,12 @@ impl Analyzer {
             }
 
             let line = item_mod.span().start().line;
-            match resolve_module_file(module_dir, &child_name, &item_mod.attrs) {
+            match resolve_module_file(
+                path_attribute_base,
+                module_dir,
+                &child_name,
+                &item_mod.attrs,
+            ) {
                 Ok((child_source, child_dir)) => {
                     self.discover_file_module(
                         target,
@@ -455,6 +491,8 @@ impl Analyzer {
         let relative = segments.join("::");
         self.module_paths
             .insert((target.root_id.clone(), relative), id.clone());
+        self.module_locations
+            .insert(id.clone(), (target.root_id.clone(), segments.to_vec()));
         self.graph.modules.insert(
             id.clone(),
             Module {
@@ -468,15 +506,7 @@ impl Analyzer {
     }
 
     fn register_items(&mut self, target: &TargetInfo, segments: &[String], items: &[Item]) {
-        let mut names = items.iter().filter_map(item_name).collect::<BTreeSet<_>>();
-        for item_use in items.iter().filter_map(|item| match item {
-            Item::Use(item_use) => Some(item_use),
-            _ => None,
-        }) {
-            for import in flatten_item_use(item_use) {
-                names.insert(import.exposed_name);
-            }
-        }
+        let names = items.iter().filter_map(item_name).collect::<BTreeSet<_>>();
         self.module_items
             .entry((target.root_id.clone(), segments.join("::")))
             .or_default()
@@ -499,40 +529,80 @@ impl Analyzer {
                 ))
         });
         let mut dependencies = BTreeMap::<(String, String), Dependency>::new();
-        let mut reexports = BTreeMap::<(String, String), BTreeSet<String>>::new();
+        let mut imports = BTreeMap::<(String, String), ImportBinding>::new();
         let raw_dependencies = std::mem::take(&mut self.raw_dependencies);
-        for raw in raw_dependencies
+        let mut pending_imports = raw_dependencies
             .iter()
-            .filter(|raw| raw.reexported_name.is_some())
-        {
-            match self.resolve_dependency(raw, &BTreeMap::new()) {
-                Resolution::Module(target) if target != raw.source => {
-                    reexports
-                        .entry((
-                            raw.source.clone(),
-                            raw.reexported_name.clone().expect("re-export was filtered"),
-                        ))
+            .filter(|raw| raw.imported_name.is_some())
+            .collect::<Vec<_>>();
+        while !pending_imports.is_empty() {
+            let mut unresolved = Vec::new();
+            let mut progress = false;
+            for raw in pending_imports {
+                let resolution = self.resolve_dependency(raw, &imports);
+                let Resolution::Unresolved(_) = resolution else {
+                    let imported_name = raw
+                        .imported_name
+                        .as_ref()
+                        .expect("import dependencies have an exposed name")
+                        .clone();
+                    let mut binding = ImportBinding::from_resolution(resolution);
+                    binding.global |= raw.global_import;
+                    for target in &binding.targets {
+                        for (via, exported_name) in &binding.opaque_routes {
+                            self.graph.opaque_reexports.insert(OpaqueReexport {
+                                source: raw.source.clone(),
+                                target: target.module.clone(),
+                                via: via.clone(),
+                                exported_name: exported_name.clone(),
+                                evidence: raw.evidence.clone(),
+                            });
+                        }
+                    }
+                    if raw.public_import {
+                        binding
+                            .opaque_routes
+                            .insert((raw.source.clone(), imported_name.clone()));
+                    }
+                    for target in &binding.targets {
+                        if target.module != raw.source {
+                            dependencies
+                                .entry((raw.source.clone(), target.module.clone()))
+                                .or_insert(Dependency {
+                                    source: raw.source.clone(),
+                                    target: target.module.clone(),
+                                    evidence: raw.evidence.clone(),
+                                });
+                        }
+                    }
+                    imports
+                        .entry((raw.source.clone(), imported_name))
                         .or_default()
-                        .insert(target.clone());
-                    dependencies
-                        .entry((raw.source.clone(), target.clone()))
-                        .or_insert(Dependency {
-                            source: raw.source.clone(),
-                            target,
-                            evidence: raw.evidence.clone(),
-                        });
-                }
-                Resolution::Module(_) | Resolution::External | Resolution::LocalItem => {}
-                Resolution::Opaque { .. } => unreachable!("re-export map starts empty"),
-                Resolution::Unresolved(message) => self.record_unresolved(raw, message),
+                        .merge(binding);
+                    progress = true;
+                    continue;
+                };
+                unresolved.push(raw);
             }
+            if !progress {
+                for raw in unresolved {
+                    let Resolution::Unresolved(message) = self.resolve_dependency(raw, &imports)
+                    else {
+                        unreachable!("an import cannot become resolvable without progress")
+                    };
+                    self.record_unresolved(raw, message);
+                }
+                break;
+            }
+            pending_imports = unresolved;
         }
+
         for raw in raw_dependencies
             .iter()
-            .filter(|raw| raw.reexported_name.is_none())
+            .filter(|raw| raw.imported_name.is_none())
         {
-            match self.resolve_dependency(raw, &reexports) {
-                Resolution::Module(target) if target != raw.source => {
+            match self.resolve_dependency(raw, &imports) {
+                Resolution::Module { target, .. } if target != raw.source => {
                     dependencies
                         .entry((raw.source.clone(), target.clone()))
                         .or_insert(Dependency {
@@ -541,22 +611,29 @@ impl Analyzer {
                             evidence: raw.evidence.clone(),
                         });
                 }
-                Resolution::Opaque {
-                    targets,
-                    via,
-                    exported_name,
-                } => {
-                    for target in targets {
-                        self.graph.opaque_reexports.insert(OpaqueReexport {
-                            source: raw.source.clone(),
-                            target,
-                            via: via.clone(),
-                            exported_name: exported_name.clone(),
-                            evidence: raw.evidence.clone(),
-                        });
+                Resolution::Imported(binding) => {
+                    for target in &binding.targets {
+                        if target.module != raw.source {
+                            dependencies
+                                .entry((raw.source.clone(), target.module.clone()))
+                                .or_insert(Dependency {
+                                    source: raw.source.clone(),
+                                    target: target.module.clone(),
+                                    evidence: raw.evidence.clone(),
+                                });
+                        }
+                        for (via, exported_name) in &binding.opaque_routes {
+                            self.graph.opaque_reexports.insert(OpaqueReexport {
+                                source: raw.source.clone(),
+                                target: target.module.clone(),
+                                via: via.clone(),
+                                exported_name: exported_name.clone(),
+                                evidence: raw.evidence.clone(),
+                            });
+                        }
                     }
                 }
-                Resolution::Module(_) | Resolution::External | Resolution::LocalItem => {}
+                Resolution::Module { .. } | Resolution::External | Resolution::LocalItem => {}
                 Resolution::Unresolved(message) => self.record_unresolved(raw, message),
             }
         }
@@ -575,7 +652,7 @@ impl Analyzer {
     fn resolve_dependency(
         &self,
         raw: &RawDependency,
-        reexports: &BTreeMap<(String, String), BTreeSet<String>>,
+        imports: &BTreeMap<(String, String), ImportBinding>,
     ) -> Resolution {
         if raw.segments.is_empty() {
             return Resolution::LocalItem;
@@ -588,7 +665,50 @@ impl Analyzer {
         let mut target_root = raw.target_root.as_str();
         let mut candidate = Vec::new();
 
-        match segments[0].as_str() {
+        let first = segments[0].as_str();
+        if !matches!(first, "crate" | "self" | "super") {
+            if let Some(binding) = imports.get(&(raw.source.clone(), first.to_owned())) {
+                return self.resolve_import_tail(
+                    binding,
+                    &segments[1..],
+                    imports,
+                    &raw.evidence.expression,
+                );
+            }
+            let mut local_candidate = raw.current_segments.clone();
+            local_candidate.extend(segments.iter().cloned());
+            let local_resolution = self.resolve_candidate(
+                &raw.target_root,
+                &local_candidate,
+                imports,
+                &raw.evidence.expression,
+                &target.name,
+            );
+            if !matches!(local_resolution, Resolution::Unresolved(_)) {
+                return local_resolution;
+            }
+            if self
+                .module_items
+                .get(&(raw.target_root.clone(), raw.current_segments.join("::")))
+                .is_some_and(|items| items.contains(first))
+            {
+                return Resolution::LocalItem;
+            }
+            let root_module = module_id(&raw.target_root, &[]);
+            if let Some(binding) = imports
+                .get(&(root_module, first.to_owned()))
+                .filter(|binding| binding.global)
+            {
+                return self.resolve_import_tail(
+                    binding,
+                    &segments[1..],
+                    imports,
+                    &raw.evidence.expression,
+                );
+            }
+        }
+
+        match first {
             "crate" => segments = &segments[1..],
             "self" => {
                 candidate = raw.current_segments.clone();
@@ -619,27 +739,42 @@ impl Analyzer {
                 return Resolution::External;
             }
             first => {
-                let top_level_key = (raw.target_root.clone(), first.to_owned());
-                if !self.module_paths.contains_key(&top_level_key) {
-                    if raw.origin == DependencyOrigin::Path {
-                        return Resolution::LocalItem;
-                    }
-                    if self
-                        .module_items
-                        .get(&(raw.target_root.clone(), String::new()))
-                        .is_some_and(|items| items.contains(first))
-                    {
-                        return Resolution::LocalItem;
-                    }
-                    return Resolution::Unresolved(format!(
+                return if raw.origin == DependencyOrigin::Path {
+                    Resolution::LocalItem
+                } else {
+                    Resolution::Unresolved(format!(
                         "could not resolve import root '{}' in target '{}'",
                         first, target.name
-                    ));
-                }
+                    ))
+                };
             }
         }
         candidate.extend(segments.iter().cloned());
 
+        let resolution = self.resolve_candidate(
+            target_root,
+            &candidate,
+            imports,
+            &raw.evidence.expression,
+            &target.name,
+        );
+        if matches!(resolution, Resolution::Unresolved(_))
+            && raw.origin == DependencyOrigin::Path
+            && !matches!(raw.segments[0].as_str(), "crate" | "self" | "super")
+        {
+            return Resolution::LocalItem;
+        }
+        resolution
+    }
+
+    fn resolve_candidate(
+        &self,
+        target_root: &str,
+        candidate: &[String],
+        imports: &BTreeMap<(String, String), ImportBinding>,
+        expression: &str,
+        target_name: &str,
+    ) -> Resolution {
         for length in (0..=candidate.len()).rev() {
             let relative = candidate[..length].join("::");
             if let Some(module) = self
@@ -648,29 +783,27 @@ impl Analyzer {
             {
                 let remaining = &candidate[length..];
                 if remaining.is_empty() {
-                    return Resolution::Module(module.clone());
+                    return Resolution::Module {
+                        target: module.clone(),
+                        exact_module: true,
+                    };
                 }
                 let exposed_name = &remaining[0];
-                if let Some(targets) = reexports.get(&(module.clone(), exposed_name.clone())) {
-                    return Resolution::Opaque {
-                        targets: targets.iter().cloned().collect(),
-                        via: module.clone(),
-                        exported_name: exposed_name.clone(),
-                    };
+                if let Some(binding) = imports.get(&(module.clone(), exposed_name.clone())) {
+                    return self.resolve_import_tail(binding, &remaining[1..], imports, expression);
                 }
-                if let Some(targets) = reexports.get(&(module.clone(), "*".to_owned())) {
-                    return Resolution::Opaque {
-                        targets: targets.iter().cloned().collect(),
-                        via: module.clone(),
-                        exported_name: "*".to_owned(),
-                    };
+                if let Some(binding) = imports.get(&(module.clone(), "*".to_owned())) {
+                    return self.resolve_import_tail(binding, remaining, imports, expression);
                 }
                 if self
                     .module_items
                     .get(&(target_root.to_owned(), relative))
                     .is_some_and(|items| items.contains(exposed_name))
                 {
-                    return Resolution::Module(module.clone());
+                    return Resolution::Module {
+                        target: module.clone(),
+                        exact_module: false,
+                    };
                 }
                 return Resolution::Unresolved(format!(
                     "could not resolve '{}' after module '{}'",
@@ -682,8 +815,65 @@ impl Analyzer {
 
         Resolution::Unresolved(format!(
             "could not resolve '{}' in target '{}'",
-            raw.evidence.expression, target.name
+            expression, target_name
         ))
+    }
+
+    fn resolve_import_tail(
+        &self,
+        binding: &ImportBinding,
+        tail: &[String],
+        imports: &BTreeMap<(String, String), ImportBinding>,
+        expression: &str,
+    ) -> Resolution {
+        if tail.is_empty() {
+            return Resolution::Imported(binding.clone());
+        }
+        let mut resolved = ImportBinding {
+            external: binding.external,
+            local: binding.local,
+            global: binding.global,
+            opaque_routes: binding.opaque_routes.clone(),
+            ..ImportBinding::default()
+        };
+        for target in &binding.targets {
+            if !target.exact_module {
+                resolved.targets.insert(target.clone());
+                continue;
+            }
+            let Some((target_root, segments)) = self.module_locations.get(&target.module) else {
+                continue;
+            };
+            let mut candidate = segments.clone();
+            candidate.extend(tail.iter().cloned());
+            let target_name = self
+                .targets
+                .get(target_root)
+                .map_or(target_root.as_str(), |target| target.name.as_str());
+            match self.resolve_candidate(target_root, &candidate, imports, expression, target_name)
+            {
+                Resolution::Module {
+                    target,
+                    exact_module,
+                } => {
+                    resolved.targets.insert(ImportTarget {
+                        module: target,
+                        exact_module,
+                    });
+                }
+                Resolution::Imported(nested) => resolved.merge(nested),
+                Resolution::External => resolved.external = true,
+                Resolution::LocalItem => resolved.local = true,
+                Resolution::Unresolved(_) => {}
+            }
+        }
+        if resolved.targets.is_empty() && !resolved.external && !resolved.local {
+            Resolution::Unresolved(format!(
+                "could not resolve '{expression}' through import alias"
+            ))
+        } else {
+            Resolution::Imported(resolved)
+        }
     }
 
     fn add_diagnostic(
@@ -711,15 +901,40 @@ impl Analyzer {
 }
 
 enum Resolution {
-    Module(String),
-    Opaque {
-        targets: Vec<String>,
-        via: String,
-        exported_name: String,
-    },
+    Module { target: String, exact_module: bool },
+    Imported(ImportBinding),
     External,
     LocalItem,
     Unresolved(String),
+}
+
+impl ImportBinding {
+    fn from_resolution(resolution: Resolution) -> Self {
+        match resolution {
+            Resolution::Module {
+                target,
+                exact_module,
+            } => Self {
+                targets: BTreeSet::from([ImportTarget {
+                    module: target,
+                    exact_module,
+                }]),
+                ..Self::default()
+            },
+            Resolution::Imported(binding) => binding,
+            Resolution::External => Self {
+                external: true,
+                ..Self::default()
+            },
+            Resolution::LocalItem => Self {
+                local: true,
+                ..Self::default()
+            },
+            Resolution::Unresolved(_) => {
+                unreachable!("unresolved imports cannot become bindings")
+            }
+        }
+    }
 }
 
 struct DependencyVisitor<'a> {
@@ -755,7 +970,9 @@ impl<'a> DependencyVisitor<'a> {
         &mut self,
         segments: Vec<String>,
         origin: DependencyOrigin,
-        reexported_name: Option<String>,
+        imported_name: Option<String>,
+        public_import: bool,
+        global_import: bool,
         span: Span,
     ) {
         if segments.is_empty() {
@@ -772,7 +989,9 @@ impl<'a> DependencyVisitor<'a> {
             },
             segments,
             origin,
-            reexported_name,
+            imported_name,
+            public_import,
+            global_import,
         });
     }
 
@@ -793,23 +1012,47 @@ impl<'ast> Visit<'ast> for DependencyVisitor<'_> {
     fn visit_item_mod(&mut self, _node: &'ast syn::ItemMod) {}
 
     fn visit_item_use(&mut self, node: &'ast ItemUse) {
-        let is_reexport = !matches!(node.vis, Visibility::Inherited);
-        for import in flatten_item_use(node) {
-            let reexported_name = is_reexport.then_some(import.exposed_name);
-            self.push_dependency(
-                import.segments,
-                DependencyOrigin::Use,
-                reexported_name,
-                node.span(),
-            );
+        let is_public = !matches!(node.vis, Visibility::Inherited);
+        match flatten_item_use(node) {
+            Ok(imports) => {
+                for import in imports {
+                    self.push_dependency(
+                        import.segments,
+                        DependencyOrigin::Use,
+                        Some(import.exposed_name),
+                        is_public,
+                        false,
+                        node.span(),
+                    );
+                }
+            }
+            Err(message) => {
+                self.diagnostics.insert(AnalysisDiagnostic {
+                    code: "unresolved-import".to_owned(),
+                    message,
+                    path: Some(self.source_path.to_owned()),
+                    line: Some(node.span().start().line),
+                });
+            }
         }
     }
 
-    fn visit_item_extern_crate(&mut self, node: &'ast ItemExternCrate) {
+    fn visit_item_extern_crate(&mut self, node: &'ast syn::ItemExternCrate) {
+        let exposed_name = node
+            .rename
+            .as_ref()
+            .map_or_else(|| node.ident.to_string(), |(_, rename)| rename.to_string());
+        let segments = if node.ident == "self" {
+            vec!["crate".to_owned()]
+        } else {
+            vec![node.ident.to_string()]
+        };
         self.push_dependency(
-            vec![node.ident.to_string()],
+            segments,
             DependencyOrigin::Use,
-            None,
+            Some(exposed_name),
+            !matches!(node.vis, Visibility::Inherited),
+            self.current_segments.is_empty(),
             node.span(),
         );
     }
@@ -821,7 +1064,14 @@ impl<'ast> Visit<'ast> for DependencyVisitor<'_> {
                 .first()
                 .is_some_and(|segment| matches!(segment.as_str(), "crate" | "self" | "super"))
         {
-            self.push_dependency(segments, DependencyOrigin::Path, None, node.span());
+            self.push_dependency(
+                segments,
+                DependencyOrigin::Path,
+                None,
+                false,
+                false,
+                node.span(),
+            );
         }
         visit::visit_path(self, node);
     }
@@ -849,28 +1099,31 @@ impl<'ast> Visit<'ast> for DependencyVisitor<'_> {
     }
 }
 
-fn flatten_item_use(item_use: &ItemUse) -> Vec<UseImport> {
+fn flatten_item_use(item_use: &ItemUse) -> Result<Vec<UseImport>, String> {
     let mut imports = Vec::new();
-    flatten_use_tree(&item_use.tree, Vec::new(), &mut imports);
-    imports
+    flatten_use_tree(&item_use.tree, Vec::new(), &mut imports)?;
+    Ok(imports)
 }
 
-fn flatten_use_tree(tree: &UseTree, prefix: Vec<String>, imports: &mut Vec<UseImport>) {
+fn flatten_use_tree(
+    tree: &UseTree,
+    prefix: Vec<String>,
+    imports: &mut Vec<UseImport>,
+) -> Result<(), String> {
     match tree {
         UseTree::Path(path) => {
             let mut next = prefix;
             next.push(path.ident.to_string());
-            flatten_use_tree(&path.tree, next, imports);
+            flatten_use_tree(&path.tree, next, imports)?;
         }
         UseTree::Name(name) => {
             let mut path = prefix;
             if name.ident != "self" {
                 path.push(name.ident.to_string());
             }
-            let exposed_name = path
-                .last()
-                .cloned()
-                .expect("a use name has an exposed identifier");
+            let Some(exposed_name) = path.last().cloned() else {
+                return Err("invalid use tree has `self` without a path prefix".to_owned());
+            };
             imports.push(UseImport {
                 segments: path,
                 exposed_name,
@@ -890,10 +1143,11 @@ fn flatten_use_tree(tree: &UseTree, prefix: Vec<String>, imports: &mut Vec<UseIm
         }),
         UseTree::Group(group) => {
             for item in &group.items {
-                flatten_use_tree(item, prefix.clone(), imports);
+                flatten_use_tree(item, prefix.clone(), imports)?;
             }
         }
     }
+    Ok(())
 }
 
 fn path_segments(path: &SynPath) -> Vec<String> {
@@ -907,11 +1161,6 @@ fn item_name(item: &Item) -> Option<String> {
     match item {
         Item::Const(item) => Some(item.ident.to_string()),
         Item::Enum(item) => Some(item.ident.to_string()),
-        Item::ExternCrate(item) => item
-            .rename
-            .as_ref()
-            .map(|(_, rename)| rename.to_string())
-            .or_else(|| Some(item.ident.to_string())),
         Item::Fn(item) => Some(item.sig.ident.to_string()),
         Item::Macro(item) => item.ident.as_ref().map(ToString::to_string),
         Item::Mod(item) => Some(item.ident.to_string()),
@@ -926,12 +1175,13 @@ fn item_name(item: &Item) -> Option<String> {
 }
 
 fn resolve_module_file(
+    path_attribute_base: &Path,
     module_dir: &Path,
     name: &str,
     attributes: &[Attribute],
 ) -> Result<(PathBuf, PathBuf), String> {
     if let Some(custom_path) = module_path_attribute(attributes)? {
-        let source = module_dir.join(&custom_path);
+        let source = path_attribute_base.join(&custom_path);
         if !source.is_file() {
             return Err(format!(
                 "module '{name}' points to missing #[path] file '{}'",
@@ -958,6 +1208,24 @@ fn resolve_module_file(
 
 fn module_path_attribute(attributes: &[Attribute]) -> Result<Option<PathBuf>, String> {
     for attribute in attributes {
+        if attribute.path().is_ident("cfg_attr") {
+            let nested = Punctuated::<Meta, Token![,]>::parse_terminated
+                .parse2(
+                    attribute
+                        .meta
+                        .require_list()
+                        .map_err(|error| error.to_string())?
+                        .tokens
+                        .clone(),
+                )
+                .map_err(|error| format!("invalid #[cfg_attr] attribute: {error}"))?;
+            if nested.iter().skip(1).any(meta_can_set_module_path) {
+                return Err(
+                    "conditional #[cfg_attr(..., path = ...)] module paths are unsupported"
+                        .to_owned(),
+                );
+            }
+        }
         if !attribute.path().is_ident("path") {
             continue;
         }
@@ -973,6 +1241,21 @@ fn module_path_attribute(attributes: &[Attribute]) -> Result<Option<PathBuf>, St
         return Ok(Some(PathBuf::from(value.value())));
     }
     Ok(None)
+}
+
+fn meta_can_set_module_path(meta: &Meta) -> bool {
+    if meta.path().is_ident("path") {
+        return true;
+    }
+    if !meta.path().is_ident("cfg_attr") {
+        return false;
+    }
+    let Meta::List(list) = meta else {
+        return false;
+    };
+    Punctuated::<Meta, Token![,]>::parse_terminated
+        .parse2(list.tokens.clone())
+        .is_ok_and(|nested| nested.iter().skip(1).any(meta_can_set_module_path))
 }
 
 fn module_id(root: &str, segments: &[String]) -> String {
@@ -1033,7 +1316,7 @@ mod tests {
     #[test]
     fn flattens_grouped_use_trees() {
         let item: ItemUse = syn::parse_str("use crate::a::{self, B, c::*};").unwrap();
-        let imports = flatten_item_use(&item);
+        let imports = flatten_item_use(&item).unwrap();
         assert_eq!(
             imports,
             vec![

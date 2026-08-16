@@ -17,13 +17,15 @@ First release of `hav`, a deterministic Rust dependency-boundary validator.
 
 ## Parser and resolution limitations
 
-- `cfg` and Cargo features are not evaluated. Repeated declarations that
-  resolve to the same canonical file coalesce; declarations that resolve one
-  module to different files fail analysis with `cfg-ambiguous-module`.
+- `cfg` and Cargo features are not evaluated. Every repeated inline body is
+  analyzed; repeated file declarations that resolve to the same canonical file
+  coalesce; declarations that resolve one module to different files fail with
+  `cfg-ambiguous-module`; conditional path attributes fail closed.
 - Macros, derives, and attribute macros are not expanded. `include!` is fatal;
   strict mode also rejects item-position macros.
-- Cross-role dependencies through public re-exports fail closed; the full
-  pub-use graph is not followed.
+- Lexical import aliases retain their terminal module. Dependencies through
+  public re-exports still fail closed when they could cross a forbidden rule;
+  the full visibility graph is not modeled.
 - External crates and build-script generated source are not parsed.
 - Method calls, dynamic dispatch, and runtime relationships do not create
   dependency edges.

@@ -81,7 +81,7 @@
   "exemptions": [],
   "analysis_errors": [],
   "limitations": [
-    "cfg predicates are not evaluated; same-file declarations coalesce and differing files fail analysis",
+    "cfg predicates are not evaluated; repeated same-source bodies are all analyzed, differing files fail, and conditional path attributes fail closed",
     "procedural and declarative macros are not expanded",
     "cross-role dependencies through public re-exports fail closed; the full pub-use graph is not followed",
     "method calls, dynamic dispatch, and runtime relationships do not create dependency edges",

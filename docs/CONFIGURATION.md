@@ -54,7 +54,9 @@ For example, package `orders` with library target `orders` has root module
 `orders::lib(orders)` and child `orders::lib(orders)::domain`. Paths use `/`
 separators and are relative to the canonical Cargo workspace root. A literal
 `#[path]` that resolves outside that root, including through `..`, an absolute
-path, or a symlink, fails analysis.
+path, or a symlink, fails analysis. Literal paths resolve from the declaring
+file or inline module directory; conditional `#[cfg_attr(..., path = ...)]`
+selection fails closed because `hav` does not evaluate `cfg` predicates.
 
 ## Forbidden and allowed rules
 

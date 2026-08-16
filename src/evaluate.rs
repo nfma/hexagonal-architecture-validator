@@ -7,7 +7,7 @@ use crate::model::{
 };
 
 const LIMITATIONS: [&str; 5] = [
-    "cfg predicates are not evaluated; same-file declarations coalesce and differing files fail analysis",
+    "cfg predicates are not evaluated; repeated same-source bodies are all analyzed, differing files fail, and conditional path attributes fail closed",
     "procedural and declarative macros are not expanded",
     "cross-role dependencies through public re-exports fail closed; the full pub-use graph is not followed",
     "method calls, dynamic dispatch, and runtime relationships do not create dependency edges",
@@ -26,7 +26,7 @@ pub fn evaluate(mut graph: DependencyGraph, config: &LoadedConfig) -> Validation
         }),
     );
     record_unmatched_roles(&mut graph, config, &classifications);
-    record_opaque_reexports(&mut graph, &classifications);
+    record_opaque_reexports(&mut graph, config, &classifications);
     let (mut findings, exemptions) = evaluate_rules(&graph, config, &classifications);
     if config.analysis.detect_cycles {
         findings.extend(cycle_findings(&graph));
@@ -142,6 +142,7 @@ fn record_unmatched_roles(
 
 fn record_opaque_reexports(
     graph: &mut DependencyGraph,
+    config: &LoadedConfig,
     classifications: &BTreeMap<String, BTreeSet<String>>,
 ) {
     for reexport in &graph.opaque_reexports {
@@ -151,7 +152,12 @@ fn record_opaque_reexports(
         let target_roles = classifications
             .get(&reexport.target)
             .expect("opaque re-export target was classified");
-        if source_roles != target_roles {
+        if source_roles != target_roles
+            || config
+                .forbidden
+                .iter()
+                .any(|rule| rule.matches(source_roles, target_roles))
+        {
             graph.diagnostics.insert(AnalysisDiagnostic {
                 code: "opaque-reexport".to_owned(),
                 message: format!(

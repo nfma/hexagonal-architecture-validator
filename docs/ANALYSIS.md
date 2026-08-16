@@ -35,9 +35,10 @@ a smaller role-based Rust schema:
 - Every non-build-script Rust target in every Cargo workspace package.
 - File modules (`mod name;`), `name.rs`, `name/mod.rs`, inline modules, and
   literal `#[path = "..."]` modules.
-- `use`, `pub use`, `extern crate`, and syntactic qualified paths. Direct
-  re-exports are recorded, but a dependency that crosses roles through a
-  re-export fails closed because v0.1 does not follow the complete pub-use graph.
+- `use`, `pub use`, `extern crate`, and syntactic qualified paths. Lexical alias
+  chains retain their terminal module. Public re-export routes are recorded,
+  and a route that could cross a forbidden boundary fails closed because v0.1
+  does not model the complete visibility graph.
 - Local `crate`, `self`, and `super` paths.
 - Renamed and unrenamed direct dependencies between workspace library crates.
 - Module-level dependency cycles.
@@ -60,10 +61,12 @@ repository writes by the validator. Analysis only reads manifests and source.
 These limitations can create false positives or false negatives and are listed
 in every JSON report and the release notes:
 
-- `cfg` predicates and Cargo feature selection are not evaluated. Repeated
-  declarations that resolve to the same canonical file coalesce. If the same
-  module resolves to different files across syntactic branches, analysis fails
-  with `cfg-ambiguous-module` rather than choosing a branch.
+- `cfg` predicates and Cargo feature selection are not evaluated. Every repeated
+  inline body for one module is analyzed, while repeated file declarations that
+  resolve to the same canonical file coalesce. If the same module resolves to
+  different files across syntactic branches, analysis fails with
+  `cfg-ambiguous-module` rather than choosing a branch. A conditional
+  `#[cfg_attr(..., path = ...)]` fails closed as `unresolved-module`.
 - Declarative and procedural macros, derives, and attribute macros are not
   expanded. Generated modules or imports can therefore be missed.
 - `include!` always fails analysis. With strict analysis, other item-position
@@ -73,10 +76,12 @@ in every JSON report and the release notes:
   runtime service lookup do not create edges.
 - External crates are recognized from Cargo dependency declarations but are not
   parsed. v0.1 rules validate workspace modules and workspace-crate edges.
-- Literal `#[path]` is supported. Its child modules resolve from the path file's
-  parent directory, matching rustc. The canonical source must remain inside the
-  Cargo workspace; absolute paths, `..` traversal, and symlinks cannot escape it.
-  Macro-computed paths are not Rust syntax.
+- Literal `#[path]` is supported and resolves from the declaring file or inline
+  module directory, matching rustc. Its child modules resolve from the selected
+  path file's parent directory. The canonical source must remain inside the Cargo
+  workspace; absolute paths, `..` traversal, and symlinks cannot escape it.
+  Conditional path attributes fail closed, and macro-computed paths are not Rust
+  syntax.
 - Build scripts are excluded. Generated source in `OUT_DIR` is not analyzed.
 - A pass means no violations were found in this declared static model. It does
   not decide whether ports are meaningful, business logic belongs in the core,
@@ -94,7 +99,7 @@ in every JSON report and the release notes:
 | `role-matched-no-modules` | A declared role matches no discovered module. |
 | `source-read-failed` | A source cannot be canonicalized or read. |
 | `unresolved-import` | A `use` or qualified path cannot be resolved to a known item or module. |
-| `unresolved-module` | A `mod` declaration has no valid source or is ambiguous. |
+| `unresolved-module` | A `mod` declaration has no valid source, uses a conditional path attribute, or is ambiguous. |
 | `unsupported-include` | Any bare or qualified `include!` invocation requires unsupported expansion. |
 | `unsupported-item-macro` | Strict analysis encountered another item-position macro it cannot expand. |
 
