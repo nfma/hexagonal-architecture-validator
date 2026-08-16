@@ -278,6 +278,39 @@ fn inline_path_modules_follow_the_inline_module_directory() {
 }
 
 #[test]
+fn inline_module_path_attribute_sets_the_child_directory() {
+    let valid = ScratchProject::basic(
+        "inline-module-path-valid",
+        "#[path = \"d\"]\npub mod outer { pub mod inner; }\n",
+        single_role_config(),
+    );
+    valid.write("src/d/inner.rs", "pub struct Inner;\n");
+    assert!(
+        valid.rustc().status.success(),
+        "fixture must compile with rustc"
+    );
+    assert_eq!(valid.run("text").status.code(), Some(0));
+
+    let invalid = ScratchProject::basic(
+        "inline-module-path-invalid",
+        "#[path = \"d\"]\npub mod outer { pub mod inner; }\n",
+        single_role_config(),
+    );
+    invalid.write("src/outer/inner.rs", "pub struct Inner;\n");
+    assert!(
+        !invalid.rustc().status.success(),
+        "inverse layout must not compile with rustc"
+    );
+    let output = invalid.run("text");
+    assert_eq!(output.status.code(), Some(2));
+    assert!(
+        String::from_utf8(output.stdout)
+            .unwrap()
+            .contains("unresolved-module")
+    );
+}
+
+#[test]
 fn public_reexport_leaf_and_alias_fail_closed_at_role_boundaries() {
     let config = "version = 1\n\n[[roles]]\nid = \"core\"\nmodules = [\"::core$\"]\n\n[[roles]]\nid = \"adapter\"\nmodules = [\"::adapter$\"]\n\n[[forbidden]]\nid = \"core-no-adapter\"\nfrom = [\"core\"]\nto = [\"adapter\"]\n";
     for (name, export, import) in [
@@ -439,6 +472,31 @@ fn cfg_module_sources_coalesce_or_fail_with_stable_ambiguity() {
             .unwrap()
             .contains("cfg-ambiguous-module")
     );
+}
+
+#[test]
+fn repeated_inline_module_bodies_are_all_analyzed() {
+    let config = "version = 1\n\n[[roles]]\nid = \"core\"\nmodules = [\"::selected$\"]\n\n[[roles]]\nid = \"adapter\"\nmodules = [\"::adapter$\"]\n\n[[forbidden]]\nid = \"core-no-adapter\"\nfrom = [\"core\"]\nto = [\"adapter\"]\n";
+    let violating_body = "use crate::adapter::Driver; pub fn run(_: Driver) {}";
+    let compliant_body = "pub fn run() {}";
+
+    for (name, first_body, second_body) in [
+        ("cfg-inline-second-violates", compliant_body, violating_body),
+        ("cfg-inline-first-violates", violating_body, compliant_body),
+    ] {
+        let source = format!(
+            "pub mod adapter {{ pub struct Driver; }}\n#[cfg(any())]\npub mod selected {{ {first_body} }}\n#[cfg(not(any()))]\npub mod selected {{ {second_body} }}\n"
+        );
+        let project = ScratchProject::basic(name, &source, config);
+        assert!(
+            project.rustc().status.success(),
+            "{name} must compile with rustc"
+        );
+        let output = project.run("text");
+        assert_eq!(output.status.code(), Some(1), "{name} must violate");
+        let stdout = String::from_utf8(output.stdout).unwrap();
+        assert_eq!(stdout.matches("error[core-no-adapter]").count(), 1);
+    }
 }
 
 #[test]

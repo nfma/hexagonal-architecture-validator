@@ -22,6 +22,8 @@ First release of `hav`, a deterministic Rust dependency-boundary validator.
   module to different files fail analysis with `cfg-ambiguous-module`.
 - Macros, derives, and attribute macros are not expanded. `include!` is fatal;
   strict mode also rejects item-position macros.
+- Cross-role dependencies through public re-exports fail closed; the full
+  pub-use graph is not followed.
 - External crates and build-script generated source are not parsed.
 - Method calls, dynamic dispatch, and runtime relationships do not create
   dependency edges.

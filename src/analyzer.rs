@@ -391,21 +391,33 @@ impl Analyzer {
                     .canonicalize()
                     .expect("discovered source was already canonicalized");
                 if let Some(existing) = self.module_sources.get(&child_id) {
-                    if existing == &canonical_source {
+                    if existing != &canonical_source {
+                        self.add_diagnostic(
+                            "cfg-ambiguous-module",
+                            format!("inline module '{child_id}' has ambiguous sources"),
+                            Some(source),
+                            Some(item_mod.span().start().line),
+                        );
                         continue;
                     }
-                    self.add_diagnostic(
-                        "cfg-ambiguous-module",
-                        format!("inline module '{child_id}' has ambiguous sources"),
-                        Some(source),
-                        Some(item_mod.span().start().line),
-                    );
-                    continue;
+                } else {
+                    self.module_sources
+                        .insert(child_id.clone(), canonical_source);
+                    self.register_module(target, &child_segments, source);
                 }
-                self.module_sources
-                    .insert(child_id.clone(), canonical_source);
-                self.register_module(target, &child_segments, source);
-                let child_dir = module_dir.join(&child_name);
+                let child_dir = match module_path_attribute(&item_mod.attrs) {
+                    Ok(Some(custom_path)) => module_dir.join(custom_path),
+                    Ok(None) => module_dir.join(&child_name),
+                    Err(message) => {
+                        self.add_diagnostic(
+                            "unresolved-module",
+                            message,
+                            Some(source),
+                            Some(item_mod.span().start().line),
+                        );
+                        continue;
+                    }
+                };
                 self.inspect_items(
                     target,
                     &child_id,

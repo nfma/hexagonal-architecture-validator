@@ -19,6 +19,7 @@ hexagonal-architecture-validator-v<version>-<target>.tar.gz
 ```
 
 The release workflow has no `pull_request` or branch trigger and cannot publish
-without a `v*` tag. GitHub Actions are pinned to immutable commit SHAs. Jobs use
-least-privilege permissions; only the final release job receives contents,
-attestation, artifact-metadata, and OIDC write permissions.
+without a `v*` tag. GitHub Actions are pinned to immutable revisions: commit
+SHAs or annotated tag-object SHAs. Jobs use least-privilege permissions; only
+the final release job receives contents, attestation, artifact-metadata, and
+OIDC write permissions.

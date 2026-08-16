@@ -95,8 +95,9 @@ For each dependency edge, `hav`:
 Allowed rules are exceptions, not a global allowlist. `exempts` is required and
 non-empty. Every entry must name a known forbidden rule, including preset rules;
 unknown IDs, self-references, and allowed-rule IDs are configuration errors.
-Give exception roles narrow path or module patterns. Rule IDs are globally
-unique across forbidden, allowed, and preset rules.
+Allowed exceptions apply only to dependency rules and never suppress
+`no-cycles`. Give exception roles narrow path or module patterns. Rule IDs are
+globally unique across forbidden, allowed, and preset rules.
 
 JSON always contains top-level `exemptions` and `summary.exemptions`, including
 when both are empty. Text reports render each applied exemption as
