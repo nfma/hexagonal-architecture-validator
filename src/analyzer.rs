@@ -3,7 +3,7 @@ use std::fs;
 use std::path::{Component, Path, PathBuf};
 
 use anyhow::{Context, bail};
-use cargo_metadata::{MetadataCommand, Package, Target};
+use cargo_metadata::{Edition, MetadataCommand, Package, Target};
 use proc_macro2::Span;
 use syn::parse::Parser;
 use syn::punctuated::Punctuated;
@@ -126,6 +126,7 @@ struct TargetInfo {
     name: String,
     root_id: String,
     source: PathBuf,
+    edition: Edition,
     workspace_aliases: BTreeMap<String, String>,
     external_aliases: BTreeSet<String>,
 }
@@ -142,6 +143,7 @@ struct RawDependency {
     target_root: String,
     current_segments: Vec<String>,
     segments: Vec<String>,
+    leading_colon: bool,
     origin: DependencyOrigin,
     imported_name: Option<String>,
     public_import: bool,
@@ -153,6 +155,12 @@ struct RawDependency {
 struct UseImport {
     segments: Vec<String>,
     exposed_name: String,
+    leading_colon: bool,
+}
+
+struct DependencyPath {
+    segments: Vec<String>,
+    leading_colon: bool,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq, Ord, PartialOrd)]
@@ -263,7 +271,8 @@ pub fn analyze(options: AnalysisOptions<'_>) -> anyhow::Result<DependencyGraph> 
 }
 
 fn build_targets(packages: &[Package]) -> anyhow::Result<Vec<TargetInfo>> {
-    let mut package_targets = BTreeMap::<String, Vec<(String, String, PathBuf, bool)>>::new();
+    let mut package_targets =
+        BTreeMap::<String, Vec<(String, String, PathBuf, bool, Edition)>>::new();
     let mut package_dependencies = BTreeMap::new();
 
     for package in packages {
@@ -289,6 +298,7 @@ fn build_targets(packages: &[Package]) -> anyhow::Result<Vec<TargetInfo>> {
                         || target.is_cdylib()
                         || target.is_staticlib()
                         || target.is_proc_macro(),
+                    target.edition,
                 ));
         }
     }
@@ -301,8 +311,8 @@ fn build_targets(packages: &[Package]) -> anyhow::Result<Vec<TargetInfo>> {
         .filter_map(|(package, targets)| {
             targets
                 .iter()
-                .find(|(_, _, _, is_library)| *is_library)
-                .map(|(name, root, _, _)| (package.clone(), (name.clone(), root.clone())))
+                .find(|(_, _, _, is_library, _)| *is_library)
+                .map(|(name, root, _, _, _)| (package.clone(), (name.clone(), root.clone())))
         })
         .collect::<BTreeMap<_, _>>();
 
@@ -311,7 +321,7 @@ fn build_targets(packages: &[Package]) -> anyhow::Result<Vec<TargetInfo>> {
         let dependencies = package_dependencies
             .get(package)
             .context("package dependency metadata is missing")?;
-        for (target_name, root_id, source, is_library) in targets {
+        for (target_name, root_id, source, is_library, edition) in targets {
             let mut workspace_aliases = BTreeMap::new();
             let mut external_aliases = BTreeSet::new();
             for dependency in dependencies {
@@ -342,6 +352,7 @@ fn build_targets(packages: &[Package]) -> anyhow::Result<Vec<TargetInfo>> {
                 name: target_name.clone(),
                 root_id: root_id.clone(),
                 source: source.clone(),
+                edition: *edition,
                 workspace_aliases,
                 external_aliases,
             });
@@ -760,7 +771,37 @@ impl Analyzer {
         let mut candidate = Vec::new();
 
         let first = segments[0].as_str();
+        if raw.leading_colon {
+            if target.edition == Edition::E2015 {
+                return self.resolve_candidate(
+                    &raw.target_root,
+                    segments,
+                    imports,
+                    &raw.evidence.expression,
+                    &target.name,
+                );
+            }
+            if let Some(workspace_root) = target.workspace_aliases.get(first) {
+                return self.resolve_candidate(
+                    workspace_root,
+                    &segments[1..],
+                    imports,
+                    &raw.evidence.expression,
+                    &target.name,
+                );
+            }
+            if target.external_aliases.contains(first) || STANDARD_CRATES.contains(&first) {
+                return Resolution::External;
+            }
+            return Resolution::Unresolved(format!(
+                "could not resolve absolute import root '{}' in target '{}'",
+                first, target.name
+            ));
+        }
         if !matches!(first, "crate" | "self" | "super") {
+            let crate_alias_takes_precedence = target.workspace_aliases.contains_key(first)
+                || target.external_aliases.contains(first)
+                || STANDARD_CRATES.contains(&first);
             if let Some(binding) = imports.get(&(raw.source.clone(), first.to_owned())) {
                 return self.resolve_import_tail(
                     binding,
@@ -771,20 +812,28 @@ impl Analyzer {
             }
             let mut local_candidate = raw.current_segments.clone();
             local_candidate.extend(segments.iter().cloned());
-            let local_resolution = self.resolve_candidate(
-                &raw.target_root,
-                &local_candidate,
-                imports,
-                &raw.evidence.expression,
-                &target.name,
-            );
-            if !matches!(local_resolution, Resolution::Unresolved(_)) {
-                return local_resolution;
+            let mut local_module = raw.current_segments.clone();
+            local_module.push(first.to_owned());
+            let local_module_exists = self
+                .module_paths
+                .contains_key(&(raw.target_root.clone(), local_module.join("::")));
+            if !crate_alias_takes_precedence || local_module_exists {
+                let local_resolution = self.resolve_candidate(
+                    &raw.target_root,
+                    &local_candidate,
+                    imports,
+                    &raw.evidence.expression,
+                    &target.name,
+                );
+                if !matches!(local_resolution, Resolution::Unresolved(_)) {
+                    return local_resolution;
+                }
             }
-            if self
-                .module_items
-                .get(&(raw.target_root.clone(), raw.current_segments.join("::")))
-                .is_some_and(|items| items.contains(first))
+            if !crate_alias_takes_precedence
+                && self
+                    .module_items
+                    .get(&(raw.target_root.clone(), raw.current_segments.join("::")))
+                    .is_some_and(|items| items.contains(first))
             {
                 return Resolution::LocalItem;
             }
@@ -1096,13 +1145,17 @@ impl<'a> DependencyVisitor<'a> {
 
     fn push_dependency(
         &mut self,
-        segments: Vec<String>,
+        path: DependencyPath,
         origin: DependencyOrigin,
         imported_name: Option<String>,
         public_import: bool,
         global_import: bool,
         span: Span,
     ) {
+        let DependencyPath {
+            segments,
+            leading_colon,
+        } = path;
         if segments.is_empty() {
             return;
         }
@@ -1113,9 +1166,14 @@ impl<'a> DependencyVisitor<'a> {
             evidence: Evidence {
                 path: self.source_path.to_owned(),
                 line: span.start().line,
-                expression: segments.join("::"),
+                expression: format!(
+                    "{}{}",
+                    if leading_colon { "::" } else { "" },
+                    segments.join("::")
+                ),
             },
             segments,
+            leading_colon,
             origin,
             imported_name,
             public_import,
@@ -1145,7 +1203,10 @@ impl<'ast> Visit<'ast> for DependencyVisitor<'_> {
             Ok(imports) => {
                 for import in imports {
                     self.push_dependency(
-                        import.segments,
+                        DependencyPath {
+                            segments: import.segments,
+                            leading_colon: import.leading_colon,
+                        },
                         DependencyOrigin::Use,
                         Some(import.exposed_name),
                         is_public,
@@ -1176,7 +1237,10 @@ impl<'ast> Visit<'ast> for DependencyVisitor<'_> {
             vec![node.ident.to_string()]
         };
         self.push_dependency(
-            segments,
+            DependencyPath {
+                segments,
+                leading_colon: false,
+            },
             DependencyOrigin::Use,
             Some(exposed_name),
             !matches!(node.vis, Visibility::Inherited),
@@ -1193,7 +1257,10 @@ impl<'ast> Visit<'ast> for DependencyVisitor<'_> {
                 .is_some_and(|segment| matches!(segment.as_str(), "crate" | "self" | "super"))
         {
             self.push_dependency(
-                segments,
+                DependencyPath {
+                    segments,
+                    leading_colon: node.leading_colon.is_some(),
+                },
                 DependencyOrigin::Path,
                 None,
                 false,
@@ -1230,6 +1297,9 @@ impl<'ast> Visit<'ast> for DependencyVisitor<'_> {
 fn flatten_item_use(item_use: &ItemUse) -> Result<Vec<UseImport>, String> {
     let mut imports = Vec::new();
     flatten_use_tree(&item_use.tree, Vec::new(), &mut imports)?;
+    for import in &mut imports {
+        import.leading_colon = item_use.leading_colon.is_some();
+    }
     Ok(imports)
 }
 
@@ -1255,6 +1325,7 @@ fn flatten_use_tree(
             imports.push(UseImport {
                 segments: path,
                 exposed_name,
+                leading_colon: false,
             });
         }
         UseTree::Rename(rename) => {
@@ -1263,11 +1334,13 @@ fn flatten_use_tree(
             imports.push(UseImport {
                 segments: path,
                 exposed_name: rename.rename.to_string(),
+                leading_colon: false,
             });
         }
         UseTree::Glob(_) => imports.push(UseImport {
             segments: prefix,
             exposed_name: "*".to_owned(),
+            leading_colon: false,
         }),
         UseTree::Group(group) => {
             for item in &group.items {
@@ -1451,16 +1524,32 @@ mod tests {
                 UseImport {
                     segments: vec!["crate".to_owned(), "a".to_owned()],
                     exposed_name: "a".to_owned(),
+                    leading_colon: false,
                 },
                 UseImport {
                     segments: vec!["crate".to_owned(), "a".to_owned(), "B".to_owned()],
                     exposed_name: "B".to_owned(),
+                    leading_colon: false,
                 },
                 UseImport {
                     segments: vec!["crate".to_owned(), "a".to_owned(), "c".to_owned()],
                     exposed_name: "*".to_owned(),
+                    leading_colon: false,
                 },
             ]
+        );
+    }
+
+    #[test]
+    fn preserves_leading_colon_on_use_imports() {
+        let item: ItemUse = syn::parse_str("use ::crate_name::Thing;").unwrap();
+        assert_eq!(
+            flatten_item_use(&item).unwrap(),
+            vec![UseImport {
+                segments: vec!["crate_name".to_owned(), "Thing".to_owned()],
+                exposed_name: "Thing".to_owned(),
+                leading_colon: true,
+            }]
         );
     }
 

@@ -33,10 +33,16 @@ impl ScratchProject {
     }
 
     fn basic(name: &str, source: &str, config: &str) -> Self {
+        Self::basic_with_edition(name, "2024", source, config)
+    }
+
+    fn basic_with_edition(name: &str, edition: &str, source: &str, config: &str) -> Self {
         let project = Self::new(name);
         project.write(
             "Cargo.toml",
-            &format!("[package]\nname = \"{name}\"\nversion = \"0.0.0\"\nedition = \"2024\"\n"),
+            &format!(
+                "[package]\nname = \"{name}\"\nversion = \"0.0.0\"\nedition = \"{edition}\"\n"
+            ),
         );
         project.write("src/lib.rs", source);
         project.write("hav.toml", config);
@@ -65,6 +71,14 @@ impl ScratchProject {
             ])
             .output()
             .expect("rustc should execute")
+    }
+
+    fn cargo_check(&self) -> Output {
+        Command::new("cargo")
+            .current_dir(&self.root)
+            .args(["check", "--workspace", "--offline"])
+            .output()
+            .expect("cargo check should execute")
     }
 }
 
@@ -95,6 +109,33 @@ fn single_role_config() -> &'static str {
 
 fn core_adapter_config() -> &'static str {
     "version = 1\n\n[[roles]]\nid = \"core\"\nmodules = [\"::core$\"]\n\n[[roles]]\nid = \"adapter\"\nmodules = [\"::adapter$\"]\n\n[[forbidden]]\nid = \"core-no-adapter\"\nfrom = [\"core\"]\nto = [\"adapter\"]\n"
+}
+
+fn workspace_shadow_project(name: &str, core_source: &str) -> ScratchProject {
+    let project = ScratchProject::new(name);
+    project.write(
+        "Cargo.toml",
+        "[workspace]\nmembers = [\"domain\", \"app\"]\nresolver = \"3\"\n",
+    );
+    project.write(
+        "domain/Cargo.toml",
+        "[package]\nname = \"domain\"\nversion = \"0.0.0\"\nedition = \"2024\"\n",
+    );
+    project.write(
+        "domain/src/lib.rs",
+        "pub mod adapter { pub struct Leak; }\n",
+    );
+    project.write(
+        "app/Cargo.toml",
+        "[package]\nname = \"app\"\nversion = \"0.0.0\"\nedition = \"2024\"\n\n[dependencies]\ndomain = { path = \"../domain\" }\n",
+    );
+    project.write("app/src/lib.rs", "pub mod core;\n");
+    project.write("app/src/core.rs", core_source);
+    project.write(
+        "hav.toml",
+        "version = 1\n\n[[roles]]\nid = \"core\"\nmodules = [\"::core$\"]\n\n[[roles]]\nid = \"adapter\"\nmodules = [\"^domain::lib.*::adapter$\"]\n\n[[forbidden]]\nid = \"core-no-adapter\"\nfrom = [\"core\"]\nto = [\"adapter\"]\n",
+    );
+    project
 }
 
 fn fixture(name: &str) -> PathBuf {
@@ -338,9 +379,154 @@ fn inline_path_modules_follow_the_inline_module_directory() {
             project.rustc().status.success(),
             "{name} must compile with rustc"
         );
-        let output = project.run("text");
+        let output = project.run("json");
         assert_eq!(output.status.code(), Some(0), "{name} must pass hav");
+        let report = json_report(&output);
+        assert!(
+            report["modules"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|module| module["id"]
+                    .as_str()
+                    .is_some_and(|id| id.ends_with("::parent::outer::inner"))),
+            "{name} must discover the inline #[path] child"
+        );
+
+        let inverse_name = format!("{name}-inverse");
+        let inverse =
+            ScratchProject::basic(&inverse_name, "pub mod parent;\n", single_role_config());
+        inverse.write(parent_file, parent_source);
+        inverse.write("src/parent/inner.rs", "pub struct Inner;\n");
+        assert!(
+            !inverse.rustc().status.success(),
+            "{name} inverse layout must not compile with rustc"
+        );
+        let output = inverse.run("text");
+        assert_eq!(output.status.code(), Some(2), "{name} must fail closed");
+        assert!(
+            String::from_utf8(output.stdout)
+                .unwrap()
+                .contains("unresolved-module")
+        );
     }
+}
+
+#[test]
+fn local_value_names_do_not_hide_workspace_crates() {
+    for (name, source) in [
+        (
+            "workspace-fn-shadow",
+            "pub fn domain() {}\npub fn leak(_: domain::adapter::Leak) {}\n",
+        ),
+        (
+            "workspace-const-shadow",
+            "pub const domain: u8 = 1;\npub fn leak(_: domain::adapter::Leak) {}\n",
+        ),
+        (
+            "workspace-use-shadow",
+            "pub fn domain() {}\nuse domain::adapter::Leak;\npub fn leak(_: Leak) {}\n",
+        ),
+    ] {
+        let project = workspace_shadow_project(name, source);
+        let cargo = project.cargo_check();
+        assert!(
+            cargo.status.success(),
+            "{name} must compile with cargo: {}",
+            String::from_utf8_lossy(&cargo.stderr)
+        );
+        let output = project.run("text");
+        assert_eq!(output.status.code(), Some(1), "{name} must violate");
+        assert!(
+            String::from_utf8(output.stdout)
+                .unwrap()
+                .contains("error[core-no-adapter]")
+        );
+    }
+
+    let control = workspace_shadow_project(
+        "workspace-no-shadow",
+        "pub fn leak(_: domain::adapter::Leak) {}\n",
+    );
+    assert!(control.cargo_check().status.success());
+    assert_eq!(control.run("text").status.code(), Some(1));
+}
+
+#[test]
+fn leading_colon_uses_extern_prelude_in_modern_editions() {
+    for (name, source) in [
+        (
+            "absolute-path-modern",
+            "pub mod domain { pub mod adapter { pub struct Leak { _private: () } } }\npub fn leak() -> ::domain::adapter::Leak { ::domain::adapter::Leak }\n",
+        ),
+        (
+            "absolute-use-modern",
+            "pub mod domain { pub mod adapter { pub struct Leak { _private: () } } }\nuse ::domain::adapter::Leak;\npub fn leak() -> Leak { Leak }\n",
+        ),
+    ] {
+        let project = workspace_shadow_project(name, source);
+        let cargo = project.cargo_check();
+        assert!(
+            cargo.status.success(),
+            "{name} must bind the workspace crate: {}",
+            String::from_utf8_lossy(&cargo.stderr)
+        );
+        let output = project.run("text");
+        assert_eq!(output.status.code(), Some(1), "{name} must violate");
+        assert!(
+            String::from_utf8(output.stdout)
+                .unwrap()
+                .contains("error[core-no-adapter]")
+        );
+    }
+}
+
+#[test]
+fn leading_colon_is_crate_root_relative_in_edition_2015() {
+    let config = "version = 1\n\n[[roles]]\nid = \"core\"\nmodules = ['^absolute-edition-2015::lib\\(absolute_edition_2015\\)::core$']\n\n[[roles]]\nid = \"adapter\"\nmodules = ['^absolute-edition-2015::lib\\(absolute_edition_2015\\)::adapter$']\n\n[[forbidden]]\nid = \"core-no-adapter\"\nfrom = [\"core\"]\nto = [\"adapter\"]\n";
+    let project = ScratchProject::basic_with_edition(
+        "absolute-edition-2015",
+        "2015",
+        "pub mod adapter { pub struct Leak; }\npub mod core { pub mod adapter { pub struct Leak { _private: () } } pub fn leak() -> ::adapter::Leak { ::adapter::Leak } }\n",
+        config,
+    );
+    let cargo = project.cargo_check();
+    assert!(
+        cargo.status.success(),
+        "edition 2015 fixture must bind the crate root: {}",
+        String::from_utf8_lossy(&cargo.stderr)
+    );
+    let output = project.run("text");
+    assert_eq!(output.status.code(), Some(1));
+    assert!(
+        String::from_utf8(output.stdout)
+            .unwrap()
+            .contains("error[core-no-adapter]")
+    );
+}
+
+#[test]
+fn opaque_reexports_consider_the_intermediate_modules_role() {
+    let config = "version = 1\n\n[[roles]]\nid = \"core\"\nmodules = [\"::core(?:$|::)\"]\n\n[[roles]]\nid = \"adapter\"\nmodules = [\"::adapters(?:$|::)\"]\n\n[[forbidden]]\nid = \"core-no-adapter\"\nfrom = [\"core\"]\nto = [\"adapter\"]\n";
+    let source = "pub mod adapters { pub mod http { pub use crate::core::model::Order; pub struct Handler; } }\npub mod core { pub mod model { pub struct Order; } pub mod service { use crate::adapters::http::Order; pub fn run(_: Order) {} } }\n";
+    let project = ScratchProject::basic("opaque-via-role", source, config);
+    assert!(project.rustc().status.success());
+    let output = project.run("text");
+    assert_eq!(output.status.code(), Some(2));
+    assert!(
+        String::from_utf8(output.stdout)
+            .unwrap()
+            .contains("error[opaque-reexport]")
+    );
+
+    let control_source = "pub mod adapters { pub mod http { pub use crate::core::model::Order; pub struct Handler; } }\npub mod core { pub mod model { pub struct Order; } pub mod service { use crate::adapters::http::Handler; pub fn run(_: Handler) {} } }\n";
+    let control = ScratchProject::basic("opaque-via-control", control_source, config);
+    assert!(control.rustc().status.success());
+    let output = control.run("text");
+    assert_eq!(output.status.code(), Some(1));
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("error[core-no-adapter]"));
+    assert!(!stdout.contains("error[opaque-reexport]"));
 }
 
 #[test]

@@ -152,11 +152,18 @@ fn record_opaque_reexports(
         let target_roles = classifications
             .get(&reexport.target)
             .expect("opaque re-export target was classified");
+        let crosses_forbidden_via = classifications.get(&reexport.via).is_some_and(|via_roles| {
+            config
+                .forbidden
+                .iter()
+                .any(|rule| rule.matches(source_roles, via_roles))
+        });
         if source_roles != target_roles
             || config
                 .forbidden
                 .iter()
                 .any(|rule| rule.matches(source_roles, target_roles))
+            || crosses_forbidden_via
         {
             graph.diagnostics.insert(AnalysisDiagnostic {
                 code: "opaque-reexport".to_owned(),
