@@ -25,7 +25,9 @@ pub fn evaluate(mut graph: DependencyGraph, config: &LoadedConfig) -> Validation
             )
         }),
     );
-    record_unmatched_roles(&mut graph, config, &classifications);
+    let notices = record_unmatched_roles(&mut graph, config, &classifications)
+        .into_iter()
+        .collect::<Vec<_>>();
     record_opaque_reexports(&mut graph, &classifications);
     let (mut findings, exemptions) = evaluate_rules(&graph, config, &classifications);
     if config.analysis.detect_cycles {
@@ -48,6 +50,7 @@ pub fn evaluate(mut graph: DependencyGraph, config: &LoadedConfig) -> Validation
         dependencies: dependencies.len(),
         violations: findings.len(),
         analysis_errors: analysis_errors.len(),
+        notices: notices.len(),
         exemptions: exemptions.len(),
     };
 
@@ -61,6 +64,7 @@ pub fn evaluate(mut graph: DependencyGraph, config: &LoadedConfig) -> Validation
         findings,
         exemptions,
         analysis_errors,
+        notices,
         limitations: LIMITATIONS.to_vec(),
     }
 }
@@ -124,20 +128,31 @@ fn record_unmatched_roles(
     graph: &mut DependencyGraph,
     config: &LoadedConfig,
     classifications: &BTreeMap<String, BTreeSet<String>>,
-) {
+) -> BTreeSet<AnalysisDiagnostic> {
+    let mut notices = BTreeSet::new();
     for role in &config.roles {
         if classifications
             .values()
             .all(|roles| !roles.contains(&role.id))
         {
-            graph.diagnostics.insert(AnalysisDiagnostic {
-                code: "role-matched-no-modules".to_owned(),
-                message: format!("declared role '{}' matched no discovered modules", role.id),
-                path: None,
-                line: None,
-            });
+            if config.preset_mandated_roles.contains(&role.id) {
+                notices.insert(AnalysisDiagnostic {
+                    code: "preset-role-unmatched".to_owned(),
+                    message: format!("preset role '{}' matched no discovered modules", role.id),
+                    path: None,
+                    line: None,
+                });
+            } else {
+                graph.diagnostics.insert(AnalysisDiagnostic {
+                    code: "role-matched-no-modules".to_owned(),
+                    message: format!("declared role '{}' matched no discovered modules", role.id),
+                    path: None,
+                    line: None,
+                });
+            }
         }
     }
+    notices
 }
 
 fn record_opaque_reexports(

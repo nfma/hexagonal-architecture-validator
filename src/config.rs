@@ -8,6 +8,8 @@ use serde::Deserialize;
 
 const SUPPORTED_CONFIG_VERSION: u32 = 1;
 const ID_PATTERN: &str = r"^[a-z][a-z0-9-]*$";
+const HEXAGONAL_ROLE_IDS: [&str; 5] =
+    ["core", "application", "port", "adapter", "composition-root"];
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -111,6 +113,7 @@ pub struct LoadedConfig {
     pub roles: Vec<Role>,
     pub forbidden: Vec<Rule>,
     pub allowed: Vec<Rule>,
+    pub preset_mandated_roles: BTreeSet<String>,
 }
 
 impl LoadedConfig {
@@ -139,8 +142,12 @@ impl LoadedConfig {
             .map(|role| compile_role(role, &id_pattern, &mut seen_role_ids))
             .collect::<anyhow::Result<Vec<_>>>()?;
 
+        let preset_mandated_roles = match file.preset {
+            Some(Preset::Hexagonal) => HEXAGONAL_ROLE_IDS.into_iter().map(str::to_owned).collect(),
+            None => BTreeSet::new(),
+        };
         let mut rules = file.forbidden;
-        if let Some(Preset::Hexagonal) = file.preset {
+        if !preset_mandated_roles.is_empty() {
             require_hexagonal_roles(&seen_role_ids)?;
             rules.extend(hexagonal_rules());
         }
@@ -181,6 +188,7 @@ impl LoadedConfig {
             roles,
             forbidden,
             allowed,
+            preset_mandated_roles,
         })
     }
 }
@@ -318,7 +326,7 @@ fn compile_patterns(kind: &str, role: &str, patterns: Vec<String>) -> anyhow::Re
 }
 
 fn require_hexagonal_roles(role_ids: &BTreeSet<String>) -> anyhow::Result<()> {
-    for required in ["core", "application", "port", "adapter", "composition-root"] {
+    for required in HEXAGONAL_ROLE_IDS {
         if !role_ids.contains(required) {
             bail!("hexagonal preset requires a '{required}' role");
         }

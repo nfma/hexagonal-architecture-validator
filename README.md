@@ -54,8 +54,20 @@ id = "core"
 paths = ["^src/core(?:/|\\.rs$)"]
 
 [[roles]]
+id = "application"
+paths = ["^src/application(?:/|\\.rs$)"]
+
+[[roles]]
+id = "port"
+paths = ["^src/ports(?:/|\\.rs$)"]
+
+[[roles]]
 id = "adapter"
 paths = ["^src/adapters(?:/|\\.rs$)"]
+
+[[roles]]
+id = "composition-root"
+paths = ["^src/main\\.rs$", "^src/bin/[^/]+\\.rs$"]
 ```
 
 See [Configuration](docs/CONFIGURATION.md) for the complete schema and preset

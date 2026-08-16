@@ -418,7 +418,7 @@ impl Analyzer {
             }
 
             let line = item_mod.span().start().line;
-            match resolve_module_file(source, module_dir, &child_name, &item_mod.attrs) {
+            match resolve_module_file(module_dir, &child_name, &item_mod.attrs) {
                 Ok((child_source, child_dir)) => {
                     self.discover_file_module(
                         target,
@@ -815,6 +815,9 @@ impl<'ast> Visit<'ast> for DependencyVisitor<'_> {
     }
 
     fn visit_item_macro(&mut self, node: &'ast ItemMacro) {
+        if node.ident.is_some() {
+            return;
+        }
         let segments = path_segments(&node.mac.path);
         if segments.last().is_some_and(|name| name == "include") {
             self.record_unsupported_macro(&node.mac, "unsupported-include");
@@ -911,16 +914,12 @@ fn item_name(item: &Item) -> Option<String> {
 }
 
 fn resolve_module_file(
-    declaring_source: &Path,
     module_dir: &Path,
     name: &str,
     attributes: &[Attribute],
 ) -> Result<(PathBuf, PathBuf), String> {
     if let Some(custom_path) = module_path_attribute(attributes)? {
-        let source = declaring_source
-            .parent()
-            .unwrap_or(module_dir)
-            .join(&custom_path);
+        let source = module_dir.join(&custom_path);
         if !source.is_file() {
             return Err(format!(
                 "module '{name}' points to missing #[path] file '{}'",

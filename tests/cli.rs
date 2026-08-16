@@ -3,9 +3,11 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+use hexagonal_architecture_validator::analyzer::{AnalysisOptions, analyze};
 use hexagonal_architecture_validator::config::LoadedConfig;
 use hexagonal_architecture_validator::evaluate::evaluate;
-use hexagonal_architecture_validator::model::{Dependency, DependencyGraph, Evidence, Module};
+use hexagonal_architecture_validator::model::Outcome;
+use hexagonal_architecture_validator::report::render_text;
 
 static SCRATCH_SEQUENCE: AtomicUsize = AtomicUsize::new(0);
 
@@ -202,6 +204,19 @@ fn malformed_config_has_the_analysis_error_exit_code() {
 }
 
 #[test]
+fn readme_quick_start_configuration_loads() {
+    let readme = include_str!("../README.md");
+    let config = readme
+        .split_once("```toml\n")
+        .and_then(|(_, rest)| rest.split_once("```"))
+        .map(|(config, _)| config)
+        .expect("README must contain a TOML quick-start block");
+    let project = ScratchProject::basic("readme-quick-start", "pub fn run() {}\n", config);
+    LoadedConfig::load(&project.root.join("hav.toml"))
+        .expect("README quick-start configuration must load");
+}
+
+#[test]
 fn path_module_children_follow_the_path_files_directory() {
     let valid = ScratchProject::basic(
         "path-child-valid",
@@ -234,6 +249,32 @@ fn path_module_children_follow_the_path_files_directory() {
             .unwrap()
             .contains("unresolved-module")
     );
+}
+
+#[test]
+fn inline_path_modules_follow_the_inline_module_directory() {
+    for (name, parent_source, parent_file) in [
+        (
+            "inline-path-non-mod-rs",
+            "pub mod outer { #[path = \"inner.rs\"] pub mod inner; }\n",
+            "src/parent.rs",
+        ),
+        (
+            "inline-path-mod-rs",
+            "pub mod outer { #[path = \"inner.rs\"] pub mod inner; }\n",
+            "src/parent/mod.rs",
+        ),
+    ] {
+        let project = ScratchProject::basic(name, "pub mod parent;\n", single_role_config());
+        project.write(parent_file, parent_source);
+        project.write("src/parent/outer/inner.rs", "pub struct Inner;\n");
+        assert!(
+            project.rustc().status.success(),
+            "{name} must compile with rustc"
+        );
+        let output = project.run("text");
+        assert_eq!(output.status.code(), Some(0), "{name} must pass hav");
+    }
 }
 
 #[test]
@@ -334,6 +375,36 @@ fn strict_analysis_defaults_true_and_requires_explicit_opt_out() {
     let relaxed_config = "version = 1\n\n[analysis]\nstrict = false\n\n[[roles]]\nid = \"module\"\npaths = [\"^src/\"]\n";
     let relaxed = ScratchProject::basic("strict-opt-out", source, relaxed_config);
     assert_eq!(relaxed.run("text").status.code(), Some(0));
+}
+
+#[test]
+fn macro_definitions_are_allowed_but_item_invocations_remain_fatal() {
+    let definition = ScratchProject::basic(
+        "macro-definition",
+        "macro_rules! square { ($value:expr) => { $value * $value }; }\npub fn square_value(value: i32) -> i32 { square!(value) }\n",
+        single_role_config(),
+    );
+    assert!(
+        definition.rustc().status.success(),
+        "macro definition fixture must compile with rustc"
+    );
+    assert_eq!(definition.run("text").status.code(), Some(0));
+
+    let invocation = ScratchProject::basic(
+        "macro-item-invocation",
+        "macro_rules! declare_item { () => { pub struct Generated; }; }\ndeclare_item!();\n",
+        single_role_config(),
+    );
+    assert!(
+        invocation.rustc().status.success(),
+        "item invocation fixture must compile with rustc"
+    );
+    let output = invocation.run("text");
+    assert_eq!(output.status.code(), Some(2));
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("unsupported-item-macro"));
+    assert!(stdout.contains("macro 'declare_item'"));
+    assert!(!stdout.contains("macro 'macro_rules'"));
 }
 
 #[test]
@@ -553,50 +624,80 @@ fn applied_exemptions_are_narrow_auditable_and_preserve_exit_contracts() {
 }
 
 #[test]
-fn shipped_example_applies_a_real_non_vacuous_exemption() {
-    let config = LoadedConfig::load(
-        &Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/hexagonal.hav.toml"),
-    )
-    .expect("shipped example config must load");
-    let root = "example::lib(example)";
-    let mut graph = DependencyGraph::default();
-    for (suffix, source) in [
-        ("core", "src/core.rs"),
-        ("application", "src/application.rs"),
-        ("ports", "src/ports/http.rs"),
-        ("adapters", "src/adapters/http.rs"),
-        ("composition", "src/main.rs"),
-    ] {
-        let id = format!("{root}::{suffix}");
-        graph.modules.insert(
-            id.clone(),
-            Module {
-                id: id.clone(),
-                package: "example".to_owned(),
-                target: root.to_owned(),
-                module: id,
-                source: source.to_owned(),
-            },
-        );
-    }
-    graph.dependencies.insert(Dependency {
-        source: format!("{root}::adapters"),
-        target: format!("{root}::composition"),
-        evidence: Evidence {
-            path: "src/adapters/http.rs".to_owned(),
-            line: 1,
-            expression: "crate::composition::start".to_owned(),
-        },
-    });
+fn shipped_example_analyzes_this_repository_without_mutation() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let config_path = root.join("examples/hexagonal.hav.toml");
+    let config = LoadedConfig::load(&config_path).expect("shipped example config must load");
+    let status_before = Command::new("git")
+        .current_dir(root)
+        .args(["status", "--porcelain=v1", "--untracked-files=all"])
+        .output()
+        .expect("git status should execute");
+    assert!(status_before.status.success());
 
+    let graph = analyze(AnalysisOptions {
+        root,
+        manifest_path: None,
+        strict: config.analysis.strict,
+    })
+    .expect("the real repository must analyze");
     let report = evaluate(graph, &config);
-    assert_eq!(
-        report.exemptions.len(),
-        1,
-        "the shipped exception must not be vacuous"
-    );
-    assert_eq!(report.exemptions[0].allowed_rule_id, "adapter-startup-hook");
+
+    let status_after = Command::new("git")
+        .current_dir(root)
+        .args(["status", "--porcelain=v1", "--untracked-files=all"])
+        .output()
+        .expect("git status should execute");
+    assert!(status_after.status.success());
+    assert_eq!(status_before.stdout, status_after.stdout);
+    assert_eq!(report.outcome, Outcome::Passed);
+    assert!(report.analysis_errors.is_empty());
     assert!(report.findings.is_empty());
+    assert_eq!(report.notices.len(), 4);
+    assert!(
+        report
+            .notices
+            .iter()
+            .all(|notice| notice.code == "preset-role-unmatched")
+    );
+    let text = render_text(&report);
+    assert!(text.contains(
+        "notice[preset-role-unmatched] preset role 'adapter' matched no discovered modules"
+    ));
+}
+
+#[test]
+fn unmatched_preset_roles_are_non_fatal_notices() {
+    let config = "version = 1\npreset = \"hexagonal\"\n\n[[roles]]\nid = \"core\"\nmodules = [\"::core$\"]\n\n[[roles]]\nid = \"application\"\nmodules = [\"::application$\"]\n\n[[roles]]\nid = \"port\"\nmodules = [\"::port$\"]\n\n[[roles]]\nid = \"adapter\"\nmodules = [\"::adapter$\"]\n\n[[roles]]\nid = \"composition-root\"\nmodules = [\"::composition_root$\"]\n";
+    let project = ScratchProject::basic(
+        "preset-unmatched-notice",
+        "pub mod core { pub struct Order; }\n",
+        config,
+    );
+    let output = project.run("text");
+    assert_eq!(output.status.code(), Some(0));
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains(
+        "notice[preset-role-unmatched] preset role 'adapter' matched no discovered modules"
+    ));
+    assert!(!stdout.contains("role-matched-no-modules"));
+
+    let json = project.run("json");
+    assert_eq!(json.status.code(), Some(0));
+    let value: serde_json::Value = serde_json::from_slice(&json.stdout).unwrap();
+    assert_eq!(value["summary"]["notices"], 4);
+    assert_eq!(value["notices"].as_array().unwrap().len(), 4);
+
+    let violating = ScratchProject::basic(
+        "preset-notice-with-violation",
+        "pub mod adapter { pub struct Console; }\npub mod core { use crate::adapter::Console; pub fn run(_: Console) {} }\n",
+        config,
+    );
+    let output = violating.run("text");
+    assert_eq!(output.status.code(), Some(1));
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("error[core-must-not-depend-on-adapters]"));
+    assert!(stdout.contains("notice[preset-role-unmatched]"));
 }
 
 #[test]
