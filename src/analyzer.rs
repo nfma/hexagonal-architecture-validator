@@ -1535,6 +1535,9 @@ fn type_item_name(item: &Item) -> Option<String> {
         Item::Enum(item) if !has_conditional_compilation(&item.attrs) => {
             Some(item.ident.to_string())
         }
+        Item::Mod(item) if !has_conditional_compilation(&item.attrs) => {
+            Some(item.ident.to_string())
+        }
         Item::Struct(item) if !has_conditional_compilation(&item.attrs) => {
             Some(item.ident.to_string())
         }

@@ -604,6 +604,57 @@ fn lexical_type_names_take_precedence_over_workspace_crates() {
 }
 
 #[test]
+fn block_local_module_names_take_precedence_over_workspace_crates() {
+    for (name, source) in [
+        (
+            "workspace-block-module-expression-shadow",
+            "pub fn call() {\n    mod domain { pub fn helper() {} }\n    domain::helper();\n}\n",
+        ),
+        (
+            "workspace-block-module-type-shadow",
+            "pub fn call() {\n    mod domain { pub mod helper { pub struct X; } }\n    let _: Option<domain::helper::X> = None;\n}\n",
+        ),
+    ] {
+        let project = workspace_shadow_project(name, source);
+        project.write(
+            "domain/src/lib.rs",
+            "pub mod adapter { pub struct Leak; }\npub mod helper { pub struct X; }\n",
+        );
+        let cargo = project.cargo_check();
+        assert!(
+            cargo.status.success(),
+            "{name} must compile with cargo: {}",
+            String::from_utf8_lossy(&cargo.stderr)
+        );
+        let output = project.run("text");
+        assert_eq!(
+            output.status.code(),
+            Some(0),
+            "{name} must not become a workspace dependency: {}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+    }
+
+    let control = workspace_shadow_project(
+        "workspace-block-module-real-dependency",
+        "pub fn call() { let _ = domain::adapter::Leak; }\n",
+    );
+    let cargo = control.cargo_check();
+    assert!(
+        cargo.status.success(),
+        "control must compile with cargo: {}",
+        String::from_utf8_lossy(&cargo.stderr)
+    );
+    let output = control.run("text");
+    assert_eq!(output.status.code(), Some(1));
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains("error[core-no-adapter]"),
+        "control must retain the real dependency: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+}
+
+#[test]
 fn opaque_reexports_consider_the_intermediate_modules_role() {
     let config = "version = 1\n\n[[roles]]\nid = \"core\"\nmodules = [\"::core(?:$|::)\"]\n\n[[roles]]\nid = \"adapter\"\nmodules = [\"::adapters(?:$|::)\"]\n\n[[forbidden]]\nid = \"core-no-adapter\"\nfrom = [\"core\"]\nto = [\"adapter\"]\n";
     let source = "pub mod adapters { pub mod http { pub use crate::core::model::Order; pub struct Handler; } }\npub mod core { pub mod model { pub struct Order; } pub mod service { use crate::adapters::http::Order; pub fn run(_: Order) {} } }\n";
