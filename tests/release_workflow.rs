@@ -110,6 +110,32 @@ fn packaged_binary_is_executed_before_release_upload() {
 }
 
 #[test]
+fn release_is_github_only_and_requires_a_signed_tag() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let manifest =
+        fs::read_to_string(root.join("Cargo.toml")).expect("Cargo manifest must be readable");
+    let manifest =
+        toml::from_str::<toml::Value>(&manifest).expect("Cargo manifest must be valid TOML");
+    assert_eq!(
+        manifest
+            .get("package")
+            .and_then(|package| package.get("publish"))
+            .and_then(toml::Value::as_bool),
+        Some(false),
+        "the release must not be publishable to a Cargo registry"
+    );
+
+    let workflow = fs::read_to_string(root.join(".github/workflows/release.yml"))
+        .expect("release workflow must be readable");
+    assert!(!workflow.contains("cargo publish"));
+    assert!(!workflow.contains("npm publish"));
+
+    let instructions = fs::read_to_string(root.join("docs/RELEASE.md"))
+        .expect("release instructions must be readable");
+    assert!(instructions.contains("signed annotated `v0.1.0` tag"));
+}
+
+#[test]
 fn release_smoke_validation_rejects_fail_open_mutations() {
     let workflow = fs::read_to_string(
         Path::new(env!("CARGO_MANIFEST_DIR")).join(".github/workflows/release.yml"),
