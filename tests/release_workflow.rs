@@ -116,6 +116,11 @@ fn release_is_github_only_and_requires_a_signed_tag() {
         fs::read_to_string(root.join("Cargo.toml")).expect("Cargo manifest must be readable");
     let manifest =
         toml::from_str::<toml::Value>(&manifest).expect("Cargo manifest must be valid TOML");
+    let version = manifest
+        .get("package")
+        .and_then(|package| package.get("version"))
+        .and_then(toml::Value::as_str)
+        .expect("the package must declare a version");
     assert_eq!(
         manifest
             .get("package")
@@ -132,7 +137,18 @@ fn release_is_github_only_and_requires_a_signed_tag() {
 
     let instructions = fs::read_to_string(root.join("docs/RELEASE.md"))
         .expect("release instructions must be readable");
-    assert!(instructions.contains("signed annotated `v0.1.0` tag"));
+    let tag = format!("v{version}");
+    assert!(instructions.contains(&format!("signed annotated `{tag}` tag")));
+    assert!(
+        root.join(format!("docs/release-notes-{tag}.md")).is_file(),
+        "the configured release version must have release notes"
+    );
+    let installation = fs::read_to_string(root.join("docs/INSTALLATION.md"))
+        .expect("installation instructions must be readable");
+    assert!(
+        installation.contains(&tag),
+        "installation instructions must pin the configured release version"
+    );
 }
 
 #[test]

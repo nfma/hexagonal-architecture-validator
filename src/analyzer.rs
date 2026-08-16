@@ -1262,7 +1262,7 @@ impl<'ast> Visit<'ast> for DependencyVisitor<'_> {
             node.stmts
                 .iter()
                 .filter_map(|statement| match statement {
-                    syn::Stmt::Item(item) => type_item_name(item),
+                    syn::Stmt::Item(item) => lexical_type_item_name(item),
                     syn::Stmt::Local(_) | syn::Stmt::Expr(_, _) | syn::Stmt::Macro(_) => None,
                 })
                 .collect(),
@@ -1527,6 +1527,15 @@ fn item_name(item: &Item) -> Option<String> {
         Item::Type(item) => Some(item.ident.to_string()),
         Item::Union(item) => Some(item.ident.to_string()),
         _ => None,
+    }
+}
+
+fn lexical_type_item_name(item: &Item) -> Option<String> {
+    match item {
+        Item::Mod(item) if !has_conditional_compilation(&item.attrs) => {
+            Some(item.ident.to_string())
+        }
+        item => type_item_name(item),
     }
 }
 

@@ -1,9 +1,8 @@
-# hexagonal-architecture-validator v0.1.0 (superseded)
+# hexagonal-architecture-validator v0.1.1
 
-The signed tag and GitHub Release are retained for auditability. This version
-was built before the final block-local module shadowing fix. Use v0.1.1 instead.
-
-First release of `hav`, a deterministic Rust dependency-boundary validator.
+Corrected release of `hav`, a deterministic Rust dependency-boundary validator.
+The signed v0.1.0 tag and GitHub Release are retained for auditability, but that
+version was built before the final block-local module shadowing fix.
 
 ## Included
 

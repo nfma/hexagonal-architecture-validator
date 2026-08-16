@@ -4,8 +4,8 @@ The release workflow is tag-driven and intentionally does not create tags.
 
 1. Ensure CI passes on the intended release commit.
 2. Review `Cargo.lock`, `cargo deny check`, action SHA pins, and
-   [v0.1 release notes](release-notes-v0.1.0.md).
-3. Create and push a signed annotated `v0.1.0` tag from the reviewed commit.
+   [v0.1.1 release notes](release-notes-v0.1.1.md).
+3. Create and push a signed annotated `v0.1.1` tag from the reviewed commit.
 4. The workflow builds the two supported targets, packages `hav`, `README.md`,
    and `LICENSE`, generates `SHA256SUMS`, creates provenance attestations, and
    creates the GitHub release from the existing tag.
@@ -27,3 +27,7 @@ OIDC write permissions.
 Distribution is GitHub-only. `Cargo.toml` disables Cargo registry publication,
 and the release workflow does not publish to npm, crates.io, or another package
 registry.
+
+The signed `v0.1.0` tag and GitHub Release are retained for auditability. They
+were built from `a60fa17` before the final block-local module shadowing fix and
+are superseded by `v0.1.1`.
