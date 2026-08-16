@@ -1,0 +1,5 @@
+version = 99
+
+[[roles]]
+id = "core"
+paths = ["^src/"]
