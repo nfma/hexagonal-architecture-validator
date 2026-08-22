@@ -29,8 +29,10 @@ version was built before the final block-local module shadowing fix.
   public re-exports still fail closed when they could cross a forbidden rule;
   the full visibility graph is not modeled.
 - Locally shadowed names take precedence over workspace-crate names. Block-local
-  module bodies are not analyzed, and a `use` through one fails closed as
-  `unresolved-import`.
+  module bodies are not analyzed. `use` declarations do not observe block-local
+  module shadowing: when the leading segment names a declared workspace crate,
+  the import resolves to that crate and may produce a forbidden-edge finding;
+  otherwise it fails closed as `unresolved-import`.
 - External crates and build-script generated source are not parsed.
 - Method calls, dynamic dispatch, and runtime relationships do not create
   dependency edges.
