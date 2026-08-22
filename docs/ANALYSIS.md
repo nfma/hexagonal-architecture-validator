@@ -84,8 +84,10 @@ use the full JSON report shape with an empty `limitations` list.
   runtime service lookup do not create edges.
 - Locally shadowed names, including types, generic parameters, and block-local
   items, take precedence over workspace-crate names. Block-local module bodies
-  are not analyzed. A `use` that resolves through a block-local module fails
-  closed as `unresolved-import`.
+  are not analyzed. `use` declarations do not observe block-local module
+  shadowing: when the leading segment names a declared workspace crate, the
+  import resolves to that crate and may produce a forbidden-edge finding;
+  otherwise it fails closed as `unresolved-import`.
 - External crates are recognized from Cargo dependency declarations but are not
   parsed. v0.1 rules validate workspace modules and workspace-crate edges.
 - Literal `#[path]` is supported and resolves from the declaring file or inline
