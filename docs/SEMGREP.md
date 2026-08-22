@@ -99,33 +99,33 @@ To prepare the same update locally:
 
 ```sh
 semgrep_update_dir=$(mktemp -d)
-semgrep_rules="$semgrep_update_dir/rules"
-trap 'rm -rf "$semgrep_update_dir"' EXIT
+semgrep_update_rules="$semgrep_update_dir/rules"
+trap 'rm -rf "$semgrep_update_dir" "${semgrep_rules:-}" "${semgrep_work_dir:-}"' EXIT
 
-mkdir -p "$semgrep_rules"
+mkdir -p "$semgrep_update_rules"
 curl --fail --silent --show-error --proto '=https' --tlsv1.2 \
   --max-time 60 --max-filesize 8388608 \
-  --output "$semgrep_rules/default.yml" \
+  --output "$semgrep_update_rules/default.yml" \
   https://semgrep.dev/c/p/default
 curl --fail --silent --show-error --proto '=https' --tlsv1.2 \
   --max-time 60 --max-filesize 8388608 \
-  --output "$semgrep_rules/security-audit.yml" \
+  --output "$semgrep_update_rules/security-audit.yml" \
   https://semgrep.dev/c/p/security-audit
 
 python3 scripts/semgrep_packs.py update \
   --manifest .semgrep/packs.lock.json \
-  --input-dir "$semgrep_rules"
+  --input-dir "$semgrep_update_rules"
 
 python3 -m unittest tests/test_semgrep_packs.py
 python3 scripts/semgrep_packs.py verify \
   --manifest .semgrep/packs.lock.json \
-  --input-dir "$semgrep_rules"
+  --input-dir "$semgrep_update_rules"
 
 uvx --no-build --from semgrep==1.173.0 semgrep scan \
   --validate \
   --metrics=off \
-  --config "$semgrep_rules/default.yml" \
-  --config "$semgrep_rules/security-audit.yml"
+  --config "$semgrep_update_rules/default.yml" \
+  --config "$semgrep_update_rules/security-audit.yml"
 ```
 
 Then run the full gate above. Never edit a digest or byte size without fetching

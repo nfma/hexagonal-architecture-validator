@@ -693,9 +693,13 @@ fn semgrep_update_runbook_is_self_contained_and_explains_check_triggering() {
 
     for required in [
         "semgrep_update_dir=$(mktemp -d)",
-        "semgrep_rules=\"$semgrep_update_dir/rules\"",
-        "--output \"$semgrep_rules/default.yml\"",
-        "--output \"$semgrep_rules/security-audit.yml\"",
+        "semgrep_update_rules=\"$semgrep_update_dir/rules\"",
+        concat!(
+            "trap 'rm -rf \"$semgrep_update_dir\" ",
+            "\"${semgrep_rules:-}\" \"${semgrep_work_dir:-}\"' EXIT",
+        ),
+        "--output \"$semgrep_update_rules/default.yml\"",
+        "--output \"$semgrep_update_rules/security-audit.yml\"",
         "python3 scripts/semgrep_packs.py update",
         "python3 scripts/semgrep_packs.py verify",
         "semgrep scan \\",
