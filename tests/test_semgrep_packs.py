@@ -4,10 +4,9 @@ import importlib.util
 import io
 import json
 import tempfile
-import unittest
 from contextlib import redirect_stderr
 from pathlib import Path
-from unittest import mock
+from unittest import TestCase, main, mock
 
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
@@ -55,7 +54,7 @@ def write_packs(directory: Path, contents: dict[str, bytes] | None = None) -> No
         (directory / spec["file"]).write_bytes(selected[spec["url"]])
 
 
-class SemgrepPackTests(unittest.TestCase):
+class SemgrepPackTests(TestCase):
     def test_committed_manifest_matches_the_closed_schema(self) -> None:
         committed = json.loads(
             (REPOSITORY_ROOT / ".semgrep" / "packs.lock.json").read_text(
@@ -86,9 +85,10 @@ class SemgrepPackTests(unittest.TestCase):
             (inputs / "security-audit.yml").write_bytes(
                 CONTENTS["https://semgrep.dev/c/p/security-audit"] + b"# changed\n"
             )
+            current_manifest = manifest()
 
             with self.assertRaisesRegex(PACKS.PackError, "integrity differs"):
-                PACKS.verify_packs(manifest(), inputs)
+                PACKS.verify_packs(current_manifest, inputs)
 
     def test_rejects_size_and_rule_count_drift(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -125,9 +125,29 @@ class SemgrepPackTests(unittest.TestCase):
             target = inputs / "target.yml"
             default.rename(target)
             default.symlink_to(target)
+            current_manifest = manifest()
 
             with self.assertRaisesRegex(PACKS.PackError, "not a regular file"):
-                PACKS.verify_packs(manifest(), inputs)
+                PACKS.verify_packs(current_manifest, inputs)
+
+    def test_rejects_pack_replaced_between_metadata_and_open(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            inputs = Path(directory)
+            write_packs(inputs)
+            replacement = inputs / "replacement.yml"
+            replacement.write_bytes(b"rules:\n- id: replacement\n")
+            original_open = PACKS.os.open
+            current_manifest = manifest()
+
+            def replace_then_open(path: Path, flags: int) -> int:
+                selected = Path(path)
+                PACKS.os.replace(replacement, selected)
+                return original_open(selected, flags)
+
+            with mock.patch.object(
+                PACKS.os, "open", side_effect=replace_then_open
+            ), self.assertRaisesRegex(PACKS.PackError, "changed while opening"):
+                PACKS.verify_packs(current_manifest, inputs)
 
     def test_rejects_manifest_source_filename_and_schema_drift(self) -> None:
         mutants = []
@@ -199,12 +219,14 @@ class SemgrepPackTests(unittest.TestCase):
             manifest_path.write_text("not JSON", encoding="utf-8")
             stderr = io.StringIO()
 
-            with redirect_stderr(stderr):
+            with mock.patch.object(
+                PACKS, "_manifest_path", return_value=manifest_path
+            ), redirect_stderr(stderr):
                 result = PACKS.main(
                     [
                         "verify",
                         "--manifest",
-                        str(manifest_path),
+                        ".semgrep/packs.lock.json",
                         "--input-dir",
                         str(root / "packs"),
                     ]
@@ -214,6 +236,37 @@ class SemgrepPackTests(unittest.TestCase):
             self.assertIn("could not read", stderr.getvalue())
             self.assertNotIn("Traceback", stderr.getvalue())
 
+    def test_cli_rejects_noncanonical_manifest_paths(self) -> None:
+        stderr = io.StringIO()
+
+        with redirect_stderr(stderr):
+            result = PACKS.main(
+                [
+                    "verify",
+                    "--manifest",
+                    "../packs.lock.json",
+                    "--input-dir",
+                    ".semgrep/rules",
+                ]
+            )
+
+        self.assertEqual(result, 1)
+        self.assertIn("--manifest must be .semgrep/packs.lock.json", stderr.getvalue())
+
+    def test_scheduled_workflow_detects_drift_without_write_permissions(self) -> None:
+        workflow = (
+            REPOSITORY_ROOT / ".github" / "workflows" / "update-semgrep-rules.yml"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("permissions:\n  contents: read", workflow)
+        self.assertIn(
+            "git diff --exit-code -- .semgrep/packs.lock.json",
+            workflow,
+        )
+        self.assertNotIn("contents: write", workflow)
+        self.assertNotIn("pull-requests: write", workflow)
+        self.assertNotIn("create-pull-request", workflow)
+
 
 if __name__ == "__main__":
-    unittest.main()
+    main()

@@ -228,25 +228,25 @@ fn assert_semgrep_gate_is_fail_closed(workflow: &str) {
 fn assert_semgrep_updater_is_protected(workflow: &str) {
     assert!(
         workflow.starts_with(concat!(
-            "name: Update Semgrep rules\n\n",
+            "name: Check Semgrep rules\n\n",
             "on:\n",
             "  schedule:\n",
             "    - cron: \"17 5 * * 1\"\n",
             "  workflow_dispatch:\n\n",
-            "permissions: {}\n",
+            "permissions:\n",
+            "  contents: read\n",
         )),
-        "Semgrep updater must be scheduled/manual with deny-by-default permissions"
+        "Semgrep drift check must be scheduled/manual and read-only"
     );
 
     let job = named_job(workflow, "update");
-    assert_unconditional("Semgrep updater job", job, "    ");
+    assert_unconditional("Semgrep drift-check job", job, "    ");
     assert!(
-        job.contains(concat!(
-            "    permissions:\n",
-            "      contents: write\n",
-            "      pull-requests: write\n",
-        )),
-        "Semgrep updater must scope write permissions to its job"
+        !job.contains("contents: write")
+            && !job.contains("pull-requests: write")
+            && !job.contains("create-pull-request")
+            && !job.contains("gh pr"),
+        "Semgrep drift check must not create or mutate pull requests"
     );
 
     let setup_uv = named_step(workflow, "Set up uv");
@@ -286,7 +286,7 @@ fn assert_semgrep_updater_is_protected(workflow: &str) {
         );
     }
 
-    let refresh = named_step(workflow, "Refresh pinned rule-pack hashes");
+    let refresh = named_step(workflow, "Refresh current rule-pack metadata");
     assert_unconditional("rule-pack refresh step", refresh, "        ");
     assert!(
         refresh.contains(concat!(
@@ -315,48 +315,12 @@ fn assert_semgrep_updater_is_protected(workflow: &str) {
         );
     }
 
-    let create = named_step(workflow, "Create signed protected update pull request");
-    assert_unconditional("Semgrep update-PR step", create, "        ");
-    for required in [
-        "uses: peter-evans/create-pull-request@5f6978faf089d4d20b00c7766989d076bb2fc7f1",
-        "add-paths: .semgrep/packs.lock.json",
-        "branch: automation/update-semgrep-rules",
-        "delete-branch: true",
-        "draft: always-true",
-        "sign-commits: true",
-    ] {
-        assert!(
-            create
-                .lines()
-                .any(|line| { line.split('#').next().unwrap_or("").trim() == required }),
-            "Semgrep update PR is missing: {required}"
-        );
-    }
-
-    let verify = named_step(workflow, "Verify signed update commit");
+    let drift = named_step(workflow, "Require a protected lock update when packs drift");
+    assert_unconditional("Semgrep pack-drift step", drift, "        ");
     assert!(
-        verify.contains(concat!(
-            "        if: >-\n",
-            "          ${{\n",
-            "            steps.pull-request.outputs.pull-request-operation == 'created' ||\n",
-            "            steps.pull-request.outputs.pull-request-operation == 'updated'\n",
-            "          }}\n",
-        )),
-        "Semgrep updater must verify created or updated commits only"
-    );
-    assert!(
-        !verify.contains("continue-on-error:"),
-        "signed-commit verification must not continue on error"
-    );
-    assert!(
-        verify
-            .lines()
-            .any(|line| line.trim() == "run: test \"$COMMITS_VERIFIED\" = \"true\""),
-        "Semgrep updater must fail when its commit is not verified"
-    );
-    assert!(
-        !workflow.contains("gh pr merge") && !workflow.contains("--auto"),
-        "Semgrep update pull requests must require protected human review"
+        drift.contains("if ! git diff --exit-code -- .semgrep/packs.lock.json; then")
+            && drift.lines().any(|line| line.trim() == "exit 1"),
+        "Semgrep drift check must fail until a protected lock update is submitted"
     );
 }
 
@@ -587,7 +551,7 @@ fn semgrep_gate_validator_rejects_fail_open_mutants() {
 }
 
 #[test]
-fn semgrep_rule_pack_updater_is_signed_draft_and_fail_closed() {
+fn semgrep_rule_pack_drift_check_is_read_only_and_fail_closed() {
     let updater =
         fs::read_to_string(repository_root().join(".github/workflows/update-semgrep-rules.yml"))
             .expect("read Semgrep updater workflow");
@@ -596,7 +560,7 @@ fn semgrep_rule_pack_updater_is_signed_draft_and_fail_closed() {
 }
 
 #[test]
-fn semgrep_rule_pack_updater_validator_rejects_unsafe_mutants() {
+fn semgrep_rule_pack_drift_validator_rejects_unsafe_mutants() {
     let updater =
         fs::read_to_string(repository_root().join(".github/workflows/update-semgrep-rules.yml"))
             .expect("read Semgrep updater workflow");
@@ -608,6 +572,10 @@ fn semgrep_rule_pack_updater_validator_rejects_unsafe_mutants() {
                 "  update:\n    continue-on-error: true\n",
                 1,
             ),
+        ),
+        (
+            "workflow gains write permission",
+            updater.replace("  contents: read", "  contents: write"),
         ),
         (
             "setup-uv cache dependency glob is removed",
@@ -626,8 +594,8 @@ fn semgrep_rule_pack_updater_validator_rejects_unsafe_mutants() {
         (
             "refresh step is conditional",
             updater.replace(
-                "      - name: Refresh pinned rule-pack hashes\n        shell: bash",
-                "      - name: Refresh pinned rule-pack hashes\n        if: ${{ false }}\n        shell: bash",
+                "      - name: Refresh current rule-pack metadata\n        shell: bash",
+                "      - name: Refresh current rule-pack metadata\n        if: ${{ false }}\n        shell: bash",
             ),
         ),
         (
@@ -654,48 +622,24 @@ fn semgrep_rule_pack_updater_validator_rejects_unsafe_mutants() {
             updater.replace("--validate \\", ""),
         ),
         (
-            "update PR can include arbitrary files",
+            "drift check is removed",
             updater.replace(
-                "add-paths: .semgrep/packs.lock.json",
-                "add-paths: .",
+                "if ! git diff --exit-code -- .semgrep/packs.lock.json; then",
+                "if false; then",
             ),
         ),
         (
-            "update PR uses a mutable branch",
+            "drift is reported but accepted",
             updater.replace(
-                "branch: automation/update-semgrep-rules",
-                "branch: main",
+                "            exit 1\n",
+                "            true\n",
             ),
         ),
         (
-            "update PR is not a draft",
-            updater.replace("draft: always-true", "draft: false"),
-        ),
-        (
-            "update commit is not signed",
-            updater.replace("sign-commits: true", "sign-commits: false"),
-        ),
-        (
-            "signed-commit verification is removed",
+            "workflow adds a PR mutation path",
             updater.replace(
-                "run: test \"$COMMITS_VERIFIED\" = \"true\"",
-                "run: echo \"$COMMITS_VERIFIED\"",
-            ),
-        ),
-        (
-            "closed pull requests spuriously require commit verification",
-            updater.replace(
-                concat!(
-                    "        if: >-\n",
-                    "          ${{\n",
-                    "            steps.pull-request.outputs.pull-request-operation == 'created' ||\n",
-                    "            steps.pull-request.outputs.pull-request-operation == 'updated'\n",
-                    "          }}\n",
-                ),
-                concat!(
-                    "        if: ${{ ",
-                    "steps.pull-request.outputs.pull-request-operation != 'none' }}\n",
-                ),
+                "      - name: Require a protected lock update when packs drift",
+                "      - name: Create update PR\n        run: gh pr create\n\n      - name: Require a protected lock update when packs drift",
             ),
         ),
     ];
@@ -738,13 +682,17 @@ fn semgrep_update_runbook_is_self_contained_and_explains_check_triggering() {
     }
     assert!(
         documentation.contains(
-            "Pull requests created by `GITHUB_TOKEN` do not trigger other\nworkflow runs."
+            "The scheduled job is read-only and does not create branches or pull requests."
         ),
-        "Semgrep docs must explain GITHUB_TOKEN workflow suppression"
+        "Semgrep docs must explain the read-only drift check"
     );
     assert!(
-        documentation.contains("`ready_for_review` event and starts the normal protected checks."),
-        "Semgrep docs must name the human-triggered check event"
+        documentation.contains("submit it through a\nnormal protected pull request"),
+        "Semgrep docs must require a normal protected pull request"
+    );
+    assert!(
+        documentation.contains("and avoids\nintroducing a long-lived PAT or GitHub App credential"),
+        "Semgrep docs must explain why the workflow does not mutate pull requests"
     );
 }
 

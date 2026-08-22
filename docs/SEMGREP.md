@@ -74,26 +74,21 @@ fetched rule bodies into the repository or another public location.
 
 ## Update pinned rule packs
 
-`Update Semgrep rules` runs every Monday and can also be started manually. It:
+`Check Semgrep rules` runs every Monday and can also be started manually. It:
 
 1. downloads the two allowlisted Registry packs;
 2. updates only their canonical hashes, byte sizes, and rule counts in
    `.semgrep/packs.lock.json`;
 3. re-checks the downloaded bytes against the refreshed integrity locks;
 4. validates both packs with the pinned Semgrep version; and
-5. opens a signed draft pull request containing only the lock manifest.
+5. fails when the checked-in lock differs from the refreshed metadata.
 
-The draft does not auto-merge. Review its hash and size changes, the Semgrep
-scan result, parser-warning baseline, and all normal protected checks before
-marking it ready. Pull requests created by `GITHUB_TOKEN` do not trigger other
-workflow runs. A maintainer must mark the draft ready, which emits the
-`ready_for_review` event and starts the normal protected checks.
-
-The repository setting **Settings → Actions → General → Workflow permissions →
-Allow GitHub Actions to create and approve pull requests** must be enabled for
-the scheduled job to open its draft. The workflow still receives no default
-permissions; write access is limited to the updater job and the PR contains
-only the lock manifest.
+The scheduled job is read-only and does not create branches or pull requests.
+When it detects drift, prepare the lock change locally, submit it through a
+normal protected pull request, and review the hash and size changes, Semgrep
+scan result, parser-warning baseline, and all required checks before merge.
+This keeps GitHub Actions unable to create or approve pull requests and avoids
+introducing a long-lived PAT or GitHub App credential.
 
 To prepare the same update locally:
 

@@ -1,11 +1,12 @@
-name: Update Semgrep rules
+name: Check Semgrep rules
 
 on:
   schedule:
     - cron: "17 5 * * 1"
   workflow_dispatch:
 
-permissions: {}
+permissions:
+  contents: read
 
 concurrency:
   group: update-semgrep-rules
@@ -13,12 +14,9 @@ concurrency:
 
 jobs:
   update:
-    name: Update rule-pack hashes
+    name: Check rule-pack drift
     runs-on: ubuntu-24.04
     timeout-minutes: 20
-    permissions:
-      contents: write
-      pull-requests: write
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -55,7 +53,7 @@ jobs:
             --output "$rules/security-audit.yml" \
             https://semgrep.dev/c/p/security-audit
 
-      - name: Refresh pinned rule-pack hashes
+      - name: Refresh current rule-pack metadata
         shell: bash
         run: >-
           python3 scripts/semgrep_packs.py update
@@ -75,32 +73,10 @@ jobs:
             --config "$rules/default.yml" \
             --config "$rules/security-audit.yml"
 
-      - name: Create signed protected update pull request
-        id: pull-request
-        uses: peter-evans/create-pull-request@5f6978faf089d4d20b00c7766989d076bb2fc7f1 # v8.1.1
-        with:
-          add-paths: .semgrep/packs.lock.json
-          branch: automation/update-semgrep-rules
-          commit-message: Update pinned Semgrep rule packs
-          delete-branch: true
-          draft: always-true
-          sign-commits: true
-          title: Update pinned Semgrep rule packs
-          body: |
-            ## What changed
-
-            - refresh the canonical SHA-256, byte-size, and rule-count locks for `p/default` and `p/security-audit`
-            - keep the Semgrep rule bodies in temporary CI storage under their non-distribution license
-            - require the normal protected pull-request checks before merge
-
-            Review the lock changes, Semgrep results, and parser-warning baseline before marking this PR ready.
-
-      - name: Verify signed update commit
-        if: >-
-          ${{
-            steps.pull-request.outputs.pull-request-operation == 'created' ||
-            steps.pull-request.outputs.pull-request-operation == 'updated'
-          }}
-        env:
-          COMMITS_VERIFIED: ${{ steps.pull-request.outputs.pull-request-commits-verified }}
-        run: test "$COMMITS_VERIFIED" = "true"
+      - name: Require a protected lock update when packs drift
+        shell: bash
+        run: |
+          if ! git diff --exit-code -- .semgrep/packs.lock.json; then
+            echo "::error::Semgrep rule packs changed. Refresh the lock locally and submit a protected pull request."
+            exit 1
+          fi
