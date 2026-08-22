@@ -249,6 +249,19 @@ fn assert_semgrep_updater_is_protected(workflow: &str) {
         "Semgrep updater must scope write permissions to its job"
     );
 
+    let setup_uv = named_step(workflow, "Set up uv");
+    assert_unconditional("setup-uv step", setup_uv, "        ");
+    for required in [
+        "version: 0.11.32",
+        "enable-cache: true",
+        "cache-dependency-glob: .semgrep/packs.lock.json",
+    ] {
+        assert!(
+            setup_uv.lines().any(|line| line.trim() == required),
+            "setup-uv cache configuration is missing: {required}"
+        );
+    }
+
     let tests = named_step(workflow, "Test rule-pack helper");
     assert_unconditional("rule-pack helper test step", tests, "        ");
     assert!(
@@ -594,6 +607,20 @@ fn semgrep_rule_pack_updater_validator_rejects_unsafe_mutants() {
                 "  update:\n",
                 "  update:\n    continue-on-error: true\n",
                 1,
+            ),
+        ),
+        (
+            "setup-uv cache dependency glob is removed",
+            updater.replace(
+                "          cache-dependency-glob: .semgrep/packs.lock.json\n",
+                "",
+            ),
+        ),
+        (
+            "setup-uv cache is keyed to an unrelated file",
+            updater.replace(
+                "cache-dependency-glob: .semgrep/packs.lock.json",
+                "cache-dependency-glob: Cargo.lock",
             ),
         ),
         (
