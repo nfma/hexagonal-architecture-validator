@@ -35,6 +35,7 @@ jobs:
         with:
           version: 0.11.32
           enable-cache: true
+          cache-dependency-glob: .semgrep/packs.lock.json
 
       - name: Test rule-pack helper
         shell: bash
