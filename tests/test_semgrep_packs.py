@@ -129,6 +129,24 @@ class SemgrepPackTests(unittest.TestCase):
             with self.assertRaisesRegex(PACKS.PackError, "not a regular file"):
                 PACKS.verify_packs(manifest(), inputs)
 
+    def test_rejects_pack_replaced_between_metadata_and_open(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            inputs = Path(directory)
+            write_packs(inputs)
+            default = inputs / "default.yml"
+            original_open = PACKS.os.open
+
+            def replace_then_open(path: Path, flags: int) -> int:
+                selected = Path(path)
+                selected.unlink()
+                selected.write_bytes(b"rules:\n- id: replacement\n")
+                return original_open(selected, flags)
+
+            with mock.patch.object(
+                PACKS.os, "open", side_effect=replace_then_open
+            ), self.assertRaisesRegex(PACKS.PackError, "changed while opening"):
+                PACKS.verify_packs(manifest(), inputs)
+
     def test_rejects_manifest_source_filename_and_schema_drift(self) -> None:
         mutants = []
         boolean_schema = manifest()
@@ -213,6 +231,20 @@ class SemgrepPackTests(unittest.TestCase):
             self.assertEqual(result, 1)
             self.assertIn("could not read", stderr.getvalue())
             self.assertNotIn("Traceback", stderr.getvalue())
+
+    def test_scheduled_workflow_detects_drift_without_write_permissions(self) -> None:
+        workflow = (
+            REPOSITORY_ROOT / ".github" / "workflows" / "update-semgrep-rules.yml"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("permissions:\n  contents: read", workflow)
+        self.assertIn(
+            "git diff --exit-code -- .semgrep/packs.lock.json",
+            workflow,
+        )
+        self.assertNotIn("contents: write", workflow)
+        self.assertNotIn("pull-requests: write", workflow)
+        self.assertNotIn("create-pull-request", workflow)
 
 
 if __name__ == "__main__":

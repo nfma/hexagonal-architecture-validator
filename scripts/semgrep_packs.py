@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import errno
 import hashlib
 import json
 import os
@@ -158,16 +159,32 @@ def _validate_pack_content(pack_id: str, content: bytes) -> tuple[str, int, int]
 
 
 def _read_pack(path: Path) -> bytes:
+    descriptor: int | None = None
     try:
-        metadata = path.lstat()
+        metadata = path.stat(follow_symlinks=False)
         if not stat.S_ISREG(metadata.st_mode):
             raise PackError(f"Semgrep pack input is not a regular file: {path}")
         if metadata.st_size > MAX_PACK_BYTES:
             raise PackError(f"Semgrep pack input exceeds {MAX_PACK_BYTES} bytes: {path}")
-        with path.open("rb") as handle:
+        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+        descriptor = os.open(path, flags)
+        opened = os.fstat(descriptor)
+        if not stat.S_ISREG(opened.st_mode):
+            raise PackError(f"Semgrep pack input is not a regular file: {path}")
+        if (opened.st_dev, opened.st_ino) != (metadata.st_dev, metadata.st_ino):
+            raise PackError(f"Semgrep pack input changed while opening: {path}")
+        if opened.st_size > MAX_PACK_BYTES:
+            raise PackError(f"Semgrep pack input exceeds {MAX_PACK_BYTES} bytes: {path}")
+        with os.fdopen(descriptor, "rb", closefd=True) as handle:
+            descriptor = None
             return handle.read(MAX_PACK_BYTES + 1)
     except OSError as error:
+        if error.errno == errno.ELOOP:
+            raise PackError(f"Semgrep pack input is not a regular file: {path}") from error
         raise PackError(f"could not read Semgrep pack input {path}: {error}") from error
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
 
 
 def _atomic_write(path: Path, content: bytes) -> None:
