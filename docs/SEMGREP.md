@@ -3,10 +3,12 @@
 The `Semgrep and Gitleaks` required check runs Semgrep 1.173.0 with hash-pinned
 snapshots of the `p/default` and `p/security-audit` community rule packs. CI
 downloads each snapshot to temporary storage and verifies its URL, byte size,
-and SHA-256 digest before Semgrep reads it. The checker fails closed when the
-pack integrity changes, the scan reports a finding, skips a rule, changes
-engine, reaches a fixpoint timeout, loses required path coverage, or emits an
-unreviewed parser warning.
+rule count, and canonical SHA-256 digest before Semgrep reads it. The canonical
+digest sorts complete rule blocks by rule ID, so harmless Registry ordering
+differences across CDN edges do not break the gate while any rule-content
+change still does. The checker fails closed when pack integrity changes, the
+scan reports a finding, skips a rule, changes engine, reaches a fixpoint
+timeout, loses required path coverage, or emits an unreviewed parser warning.
 
 The repository deliberately does not commit the rule bodies. The
 [Semgrep Rules License v1.0](https://semgrep.dev/legal/rules-license/) permits
@@ -75,7 +77,8 @@ fetched rule bodies into the repository or another public location.
 `Update Semgrep rules` runs every Monday and can also be started manually. It:
 
 1. downloads the two allowlisted Registry packs;
-2. updates only their hashes and byte sizes in `.semgrep/packs.lock.json`;
+2. updates only their canonical hashes, byte sizes, and rule counts in
+   `.semgrep/packs.lock.json`;
 3. fetches the packs again through the integrity verifier;
 4. validates both packs with the pinned Semgrep version; and
 5. opens a signed draft pull request containing only the lock manifest.

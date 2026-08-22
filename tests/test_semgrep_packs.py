@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hashlib
 import importlib.util
 import io
 import json
@@ -29,13 +28,15 @@ def manifest() -> dict[str, object]:
     packs = []
     for pack_id, spec in PACKS.PACK_SPECS.items():
         content = CONTENTS[spec["url"]]
+        digest, size, rules = PACKS._validate_pack_content(pack_id, content)
         packs.append(
             {
                 "id": pack_id,
                 "url": spec["url"],
                 "file": spec["file"],
-                "sha256": hashlib.sha256(content).hexdigest(),
-                "bytes": len(content),
+                "canonicalSha256": digest,
+                "bytes": size,
+                "rules": rules,
             }
         )
     return {
@@ -88,6 +89,21 @@ class SemgrepPackTests(unittest.TestCase):
             with self.assertRaisesRegex(PACKS.PackError, "integrity differs"):
                 PACKS.verify_packs(manifest(), inputs)
 
+    def test_rule_order_does_not_change_the_canonical_digest(self) -> None:
+        first = b"rules:\n- id: b\n  pattern: b()\n- id: a\n  pattern: a()\n"
+        second = b"rules:\n- id: a\n  pattern: a()\n- id: b\n  pattern: b()\n"
+
+        first_digest, first_size, first_rules = PACKS._validate_pack_content(
+            "p/default", first
+        )
+        second_digest, second_size, second_rules = PACKS._validate_pack_content(
+            "p/default", second
+        )
+
+        self.assertEqual(first_digest, second_digest)
+        self.assertEqual(first_size, second_size)
+        self.assertEqual(first_rules, second_rules)
+
     def test_rejects_symlinked_pack_inputs(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             inputs = Path(directory)
@@ -135,15 +151,22 @@ class SemgrepPackTests(unittest.TestCase):
                 refreshed["packs"][0]["bytes"],
                 len(changed["https://semgrep.dev/c/p/default"]),
             )
-            self.assertEqual(
-                refreshed["packs"][0]["sha256"],
-                hashlib.sha256(changed["https://semgrep.dev/c/p/default"]).hexdigest(),
+            digest, _, rules = PACKS._validate_pack_content(
+                "p/default", changed["https://semgrep.dev/c/p/default"]
             )
+            self.assertEqual(refreshed["packs"][0]["canonicalSha256"], digest)
+            self.assertEqual(refreshed["packs"][0]["rules"], rules)
 
     def test_rejects_non_rules_documents_and_oversized_packs(self) -> None:
         for content in (b"not-rules: []\n", b"rules:\n" + b"x" * PACKS.MAX_PACK_BYTES):
             with self.assertRaises(PACKS.PackError):
                 PACKS._validate_pack_content("p/default", content)
+
+    def test_rejects_duplicate_rule_ids(self) -> None:
+        duplicate = b"rules:\n- id: duplicate\n  pattern: a()\n- id: duplicate\n  pattern: b()\n"
+
+        with self.assertRaisesRegex(PACKS.PackError, "duplicate rule ids"):
+            PACKS._validate_pack_content("p/default", duplicate)
 
     def test_cli_rejects_invalid_json_without_a_traceback(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

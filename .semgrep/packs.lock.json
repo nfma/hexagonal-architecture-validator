@@ -8,15 +8,17 @@
       "id": "p/default",
       "url": "https://semgrep.dev/c/p/default",
       "file": "default.yml",
-      "sha256": "8161970705e48d556865d7e9e758394b1d0f8c34467f536fac4f73d4c28606cc",
-      "bytes": 2423491
+      "canonicalSha256": "6b522164116745a9f68c95ab3ff030a88b491fcd7b7a287724d1607b0a3f0f53",
+      "bytes": 2423491,
+      "rules": 1073
     },
     {
       "id": "p/security-audit",
       "url": "https://semgrep.dev/c/p/security-audit",
       "file": "security-audit.yml",
-      "sha256": "b109a039df712f30c6d3e25e1e8358053fd0f1c91b92d0e8d2871cd141fe602f",
-      "bytes": 473625
+      "canonicalSha256": "8ffbec3f8a26cc755187cc024bbb9e676c7d6aa7b87155f458a2e150440fabdf",
+      "bytes": 473625,
+      "rules": 225
     }
   ]
 }

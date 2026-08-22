@@ -88,7 +88,7 @@ jobs:
           body: |
             ## What changed
 
-            - refresh the SHA-256 and byte-size locks for `p/default` and `p/security-audit`
+            - refresh the canonical SHA-256, byte-size, and rule-count locks for `p/default` and `p/security-audit`
             - keep the Semgrep rule bodies in temporary CI storage under their non-distribution license
             - require the normal protected pull-request checks before merge
 
