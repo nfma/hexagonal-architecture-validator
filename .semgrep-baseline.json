@@ -1,0 +1,60 @@
+{
+  "schemaVersion": 1,
+  "semgrepVersion": "1.173.0",
+  "errors": [
+    {
+      "code": 3,
+      "level": "warn",
+      "type": "PartialParsing",
+      "path": ".github/workflows/ci.yml",
+      "source": "        run: cargo +${{ matrix.toolchain }} fmt --all -- --check",
+      "message": "Syntax error at line .github/workflows/ci.yml:<LINE>:\n When parsing a snippet as Bash for metavariable-pattern in rule 'yaml.github-actions.security.curl-eval.curl-eval', `${{` was unexpected",
+      "rationale": "The rule parses the valid GitHub matrix expression inside the cargo fmt command as standalone Bash; actionlint and the workflow test validate this command."
+    },
+    {
+      "code": 3,
+      "level": "warn",
+      "type": "PartialParsing",
+      "path": ".github/workflows/ci.yml",
+      "source": "        run: cargo +${{ matrix.toolchain }} fmt --all -- --check",
+      "message": "Syntax error at line .github/workflows/ci.yml:<LINE>:\n When parsing a snippet as Bash for metavariable-pattern in rule 'yaml.github-actions.security.gha-curl-pipe-shell.gha-curl-pipe-shell', `${{` was unexpected",
+      "rationale": "The rule parses the valid GitHub matrix expression inside the cargo fmt command as standalone Bash; actionlint and the workflow test validate this command."
+    },
+    {
+      "code": 3,
+      "level": "warn",
+      "type": "PartialParsing",
+      "path": ".github/workflows/ci.yml",
+      "source": "        run: cargo +${{ matrix.toolchain }} clippy --all-targets --all-features --locked -- -D warnings",
+      "message": "Syntax error at line .github/workflows/ci.yml:<LINE>:\n When parsing a snippet as Bash for metavariable-pattern in rule 'yaml.github-actions.security.curl-eval.curl-eval', `${{` was unexpected",
+      "rationale": "The rule parses the valid GitHub matrix expression inside the cargo clippy command as standalone Bash; actionlint and the workflow test validate this command."
+    },
+    {
+      "code": 3,
+      "level": "warn",
+      "type": "PartialParsing",
+      "path": ".github/workflows/ci.yml",
+      "source": "        run: cargo +${{ matrix.toolchain }} clippy --all-targets --all-features --locked -- -D warnings",
+      "message": "Syntax error at line .github/workflows/ci.yml:<LINE>:\n When parsing a snippet as Bash for metavariable-pattern in rule 'yaml.github-actions.security.gha-curl-pipe-shell.gha-curl-pipe-shell', `${{` was unexpected",
+      "rationale": "The rule parses the valid GitHub matrix expression inside the cargo clippy command as standalone Bash; actionlint and the workflow test validate this command."
+    },
+    {
+      "code": 3,
+      "level": "warn",
+      "type": "PartialParsing",
+      "path": ".github/workflows/ci.yml",
+      "source": "        run: cargo +${{ matrix.toolchain }} test --all-targets --locked",
+      "message": "Syntax error at line .github/workflows/ci.yml:<LINE>:\n When parsing a snippet as Bash for metavariable-pattern in rule 'yaml.github-actions.security.curl-eval.curl-eval', `${{` was unexpected",
+      "rationale": "The rule parses the valid GitHub matrix expression inside the cargo test command as standalone Bash; actionlint and the workflow test validate this command."
+    },
+    {
+      "code": 3,
+      "level": "warn",
+      "type": "PartialParsing",
+      "path": ".github/workflows/ci.yml",
+      "source": "        run: cargo +${{ matrix.toolchain }} test --all-targets --locked",
+      "message": "Syntax error at line .github/workflows/ci.yml:<LINE>:\n When parsing a snippet as Bash for metavariable-pattern in rule 'yaml.github-actions.security.gha-curl-pipe-shell.gha-curl-pipe-shell', `${{` was unexpected",
+      "rationale": "The rule parses the valid GitHub matrix expression inside the cargo test command as standalone Bash; actionlint and the workflow test validate this command."
+    }
+  ]
+}
