@@ -1,0 +1,22 @@
+{
+  "schemaVersion": 1,
+  "semgrepVersion": "1.173.0",
+  "license": "Semgrep Rules License v1.0",
+  "licenseUrl": "https://semgrep.dev/legal/rules-license/",
+  "packs": [
+    {
+      "id": "p/default",
+      "url": "https://semgrep.dev/c/p/default",
+      "file": "default.yml",
+      "sha256": "8161970705e48d556865d7e9e758394b1d0f8c34467f536fac4f73d4c28606cc",
+      "bytes": 2423491
+    },
+    {
+      "id": "p/security-audit",
+      "url": "https://semgrep.dev/c/p/security-audit",
+      "file": "security-audit.yml",
+      "sha256": "b109a039df712f30c6d3e25e1e8358053fd0f1c91b92d0e8d2871cd141fe602f",
+      "bytes": 473625
+    }
+  ]
+}

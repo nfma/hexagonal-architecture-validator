@@ -45,15 +45,31 @@ jobs:
 
       - name: Test Semgrep report checker
         shell: bash
-        run: python3 -m unittest tests/test_check_semgrep.py
+        run: >-
+          python3 -m unittest
+          tests/test_check_semgrep.py
+          tests/test_semgrep_packs.py
 
       - name: Run Semgrep community security rules
         shell: bash
         run: |
+          rules=".semgrep/rules"
           report="$RUNNER_TEMP/semgrep.json"
+          mkdir -p "$rules"
+          curl --fail --silent --show-error --proto '=https' --tlsv1.2 \
+            --max-time 60 --max-filesize 8388608 \
+            --output "$rules/default.yml" \
+            https://semgrep.dev/c/p/default
+          curl --fail --silent --show-error --proto '=https' --tlsv1.2 \
+            --max-time 60 --max-filesize 8388608 \
+            --output "$rules/security-audit.yml" \
+            https://semgrep.dev/c/p/security-audit
+          python3 scripts/semgrep_packs.py verify \
+            --manifest .semgrep/packs.lock.json \
+            --input-dir "$rules"
           uvx --no-build --from semgrep==1.173.0 semgrep scan \
-            --config p/default \
-            --config p/security-audit \
+            --config "$rules/default.yml" \
+            --config "$rules/security-audit.yml" \
             --error \
             --metrics=off \
             --exclude target \

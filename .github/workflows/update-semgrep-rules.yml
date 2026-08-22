@@ -1,0 +1,101 @@
+name: Update Semgrep rules
+
+on:
+  schedule:
+    - cron: "17 5 * * 1"
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: update-semgrep-rules
+  cancel-in-progress: false
+
+jobs:
+  update:
+    name: Update rule-pack hashes
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.11"
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          version: 0.11.32
+          enable-cache: true
+
+      - name: Test rule-pack helper
+        shell: bash
+        run: python3 -m unittest tests/test_semgrep_packs.py
+
+      - name: Download current rule packs
+        shell: bash
+        run: |
+          rules="$RUNNER_TEMP/semgrep-rules"
+          mkdir -p "$rules"
+          curl --fail --silent --show-error --proto '=https' --tlsv1.2 \
+            --max-time 60 --max-filesize 8388608 \
+            --output "$rules/default.yml" \
+            https://semgrep.dev/c/p/default
+          curl --fail --silent --show-error --proto '=https' --tlsv1.2 \
+            --max-time 60 --max-filesize 8388608 \
+            --output "$rules/security-audit.yml" \
+            https://semgrep.dev/c/p/security-audit
+
+      - name: Refresh pinned rule-pack hashes
+        shell: bash
+        run: >-
+          python3 scripts/semgrep_packs.py update
+          --manifest .semgrep/packs.lock.json
+          --input-dir "$RUNNER_TEMP/semgrep-rules"
+
+      - name: Validate refreshed rule packs
+        shell: bash
+        run: |
+          rules="$RUNNER_TEMP/semgrep-rules"
+          python3 scripts/semgrep_packs.py verify \
+            --manifest .semgrep/packs.lock.json \
+            --input-dir "$rules"
+          uvx --no-build --from semgrep==1.173.0 semgrep scan \
+            --validate \
+            --metrics=off \
+            --config "$rules/default.yml" \
+            --config "$rules/security-audit.yml"
+
+      - name: Create signed protected update pull request
+        id: pull-request
+        uses: peter-evans/create-pull-request@5f6978faf089d4d20b00c7766989d076bb2fc7f1 # v8.1.1
+        with:
+          add-paths: .semgrep/packs.lock.json
+          branch: automation/update-semgrep-rules
+          commit-message: Update pinned Semgrep rule packs
+          delete-branch: true
+          draft: always-true
+          sign-commits: true
+          title: Update pinned Semgrep rule packs
+          body: |
+            ## What changed
+
+            - refresh the SHA-256 and byte-size locks for `p/default` and `p/security-audit`
+            - keep the Semgrep rule bodies in temporary CI storage under their non-distribution license
+            - require the normal protected pull-request checks before merge
+
+            Review the lock changes, Semgrep results, and parser-warning baseline before marking this PR ready.
+
+      - name: Verify signed update commit
+        if: ${{ steps.pull-request.outputs.pull-request-operation != 'none' }}
+        env:
+          COMMITS_VERIFIED: ${{ steps.pull-request.outputs.pull-request-commits-verified }}
+        run: test "$COMMITS_VERIFIED" = "true"
