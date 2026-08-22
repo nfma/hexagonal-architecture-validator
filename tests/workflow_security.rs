@@ -131,6 +131,30 @@ fn assert_unconditional(label: &str, yaml: &str, indentation: &str) {
     }
 }
 
+fn assert_pull_request_rechecks_ready_drafts(name: &str, workflow: &str) {
+    let marker = "  pull_request:\n";
+    let tail = workflow
+        .split_once(marker)
+        .map(|(_, tail)| tail)
+        .unwrap_or_else(|| panic!("{name} must run for pull requests"));
+    let mut end = tail.len();
+    let mut offset = 0;
+    for line in tail.split_inclusive('\n') {
+        if line.starts_with("  ") && !line.starts_with("   ") {
+            end = offset;
+            break;
+        }
+        offset += line.len();
+    }
+    let pull_request = &tail[..end];
+    assert!(
+        pull_request
+            .lines()
+            .any(|line| line == "    types: [opened, reopened, synchronize, ready_for_review]"),
+        "{name} must rerun when a draft update pull request is marked ready"
+    );
+}
+
 fn assert_semgrep_gate_is_fail_closed(workflow: &str) {
     let job = named_job(workflow, "semgrep-and-secrets");
     assert_unconditional("Semgrep job", job, "    ");
@@ -142,10 +166,13 @@ fn assert_semgrep_gate_is_fail_closed(workflow: &str) {
         "Semgrep checker tests must use the fail-fast Bash shell"
     );
     assert!(
-        tests
-            .lines()
-            .any(|line| line == "        run: python3 -m unittest tests/test_check_semgrep.py"),
-        "Semgrep checker regressions are not executed"
+        tests.contains(concat!(
+            "        run: >-\n",
+            "          python3 -m unittest\n",
+            "          tests/test_check_semgrep.py\n",
+            "          tests/test_semgrep_packs.py\n",
+        )),
+        "Semgrep checker and pack regressions are not executed"
     );
 
     let scan = named_step(workflow, "Run Semgrep community security rules");
@@ -166,10 +193,23 @@ fn assert_semgrep_gate_is_fail_closed(workflow: &str) {
     assert_eq!(
         commands,
         [
+            "rules=\".semgrep/rules\"",
             "report=\"$RUNNER_TEMP/semgrep.json\"",
+            "mkdir -p \"$rules\"",
+            "curl --fail --silent --show-error --proto '=https' --tlsv1.2 \\",
+            "--max-time 60 --max-filesize 8388608 \\",
+            "--output \"$rules/default.yml\" \\",
+            "https://semgrep.dev/c/p/default",
+            "curl --fail --silent --show-error --proto '=https' --tlsv1.2 \\",
+            "--max-time 60 --max-filesize 8388608 \\",
+            "--output \"$rules/security-audit.yml\" \\",
+            "https://semgrep.dev/c/p/security-audit",
+            "python3 scripts/semgrep_packs.py verify \\",
+            "--manifest .semgrep/packs.lock.json \\",
+            "--input-dir \"$rules\"",
             "uvx --no-build --from semgrep==1.173.0 semgrep scan \\",
-            "--config p/default \\",
-            "--config p/security-audit \\",
+            "--config \"$rules/default.yml\" \\",
+            "--config \"$rules/security-audit.yml\" \\",
             "--error \\",
             "--metrics=off \\",
             "--exclude target \\",
@@ -185,6 +225,128 @@ fn assert_semgrep_gate_is_fail_closed(workflow: &str) {
     );
 }
 
+fn assert_semgrep_updater_is_protected(workflow: &str) {
+    assert!(
+        workflow.starts_with(concat!(
+            "name: Update Semgrep rules\n\n",
+            "on:\n",
+            "  schedule:\n",
+            "    - cron: \"17 5 * * 1\"\n",
+            "  workflow_dispatch:\n\n",
+            "permissions: {}\n",
+        )),
+        "Semgrep updater must be scheduled/manual with deny-by-default permissions"
+    );
+
+    let job = named_job(workflow, "update");
+    assert_unconditional("Semgrep updater job", job, "    ");
+    assert!(
+        job.contains(concat!(
+            "    permissions:\n",
+            "      contents: write\n",
+            "      pull-requests: write\n",
+        )),
+        "Semgrep updater must scope write permissions to its job"
+    );
+
+    let tests = named_step(workflow, "Test rule-pack helper");
+    assert_unconditional("rule-pack helper test step", tests, "        ");
+    assert!(
+        tests.contains("        run: python3 -m unittest tests/test_semgrep_packs.py\n"),
+        "Semgrep updater must run rule-pack helper regressions"
+    );
+
+    let download = named_step(workflow, "Download current rule packs");
+    assert_unconditional("rule-pack download step", download, "        ");
+    for required in [
+        "mkdir -p \"$rules\"",
+        "curl --fail --silent --show-error --proto '=https' --tlsv1.2 \\",
+        "--max-time 60 --max-filesize 8388608 \\",
+        "--output \"$rules/default.yml\" \\",
+        "https://semgrep.dev/c/p/default",
+        "--output \"$rules/security-audit.yml\" \\",
+        "https://semgrep.dev/c/p/security-audit",
+    ] {
+        assert!(
+            download.lines().any(|line| line.trim() == required),
+            "Semgrep updater download is missing: {required}"
+        );
+    }
+
+    let refresh = named_step(workflow, "Refresh pinned rule-pack hashes");
+    assert_unconditional("rule-pack refresh step", refresh, "        ");
+    assert!(
+        refresh.contains(concat!(
+            "        run: >-\n",
+            "          python3 scripts/semgrep_packs.py update\n",
+            "          --manifest .semgrep/packs.lock.json\n",
+            "          --input-dir \"$RUNNER_TEMP/semgrep-rules\"\n",
+        )),
+        "Semgrep updater must refresh only the reviewed lock manifest"
+    );
+
+    let validate = named_step(workflow, "Validate refreshed rule packs");
+    assert_unconditional("refreshed rule-pack validation step", validate, "        ");
+    for required in [
+        "python3 scripts/semgrep_packs.py verify \\",
+        "--manifest .semgrep/packs.lock.json \\",
+        "--input-dir \"$rules\"",
+        "uvx --no-build --from semgrep==1.173.0 semgrep scan \\",
+        "--validate \\",
+        "--config \"$rules/default.yml\" \\",
+        "--config \"$rules/security-audit.yml\"",
+    ] {
+        assert!(
+            validate.lines().any(|line| line.trim() == required),
+            "Semgrep updater validation is missing: {required}"
+        );
+    }
+
+    let create = named_step(workflow, "Create signed protected update pull request");
+    assert_unconditional("Semgrep update-PR step", create, "        ");
+    for required in [
+        "uses: peter-evans/create-pull-request@5f6978faf089d4d20b00c7766989d076bb2fc7f1",
+        "add-paths: .semgrep/packs.lock.json",
+        "branch: automation/update-semgrep-rules",
+        "delete-branch: true",
+        "draft: always-true",
+        "sign-commits: true",
+    ] {
+        assert!(
+            create
+                .lines()
+                .any(|line| { line.split('#').next().unwrap_or("").trim() == required }),
+            "Semgrep update PR is missing: {required}"
+        );
+    }
+
+    let verify = named_step(workflow, "Verify signed update commit");
+    assert!(
+        verify.contains(concat!(
+            "        if: >-\n",
+            "          ${{\n",
+            "            steps.pull-request.outputs.pull-request-operation == 'created' ||\n",
+            "            steps.pull-request.outputs.pull-request-operation == 'updated'\n",
+            "          }}\n",
+        )),
+        "Semgrep updater must verify created or updated commits only"
+    );
+    assert!(
+        !verify.contains("continue-on-error:"),
+        "signed-commit verification must not continue on error"
+    );
+    assert!(
+        verify
+            .lines()
+            .any(|line| line.trim() == "run: test \"$COMMITS_VERIFIED\" = \"true\""),
+        "Semgrep updater must fail when its commit is not verified"
+    );
+    assert!(
+        !workflow.contains("gh pr merge") && !workflow.contains("--auto"),
+        "Semgrep update pull requests must require protected human review"
+    );
+}
+
 #[test]
 fn every_external_action_is_pinned_to_a_full_commit_sha() {
     let checked = workflows()
@@ -193,6 +355,33 @@ fn every_external_action_is_pinned_to_a_full_commit_sha() {
         .sum::<usize>();
 
     assert!(checked > 0, "no external action references were checked");
+}
+
+#[test]
+fn protected_pull_request_workflows_recheck_ready_drafts() {
+    for name in [
+        "ci.yml",
+        "codeql.yml",
+        "dependency-audit.yml",
+        "repository-quality.yml",
+        "security.yml",
+        "sonar.yml",
+    ] {
+        let workflow = fs::read_to_string(repository_root().join(".github/workflows").join(name))
+            .unwrap_or_else(|error| panic!("read {name}: {error}"));
+        assert_pull_request_rechecks_ready_drafts(name, &workflow);
+
+        let mutant = workflow.replace(
+            "    types: [opened, reopened, synchronize, ready_for_review]",
+            "    types: [opened, reopened, synchronize]",
+        );
+        assert_ne!(mutant, workflow, "{name} mutation must change the workflow");
+        assert!(
+            std::panic::catch_unwind(|| assert_pull_request_rechecks_ready_drafts(name, &mutant))
+                .is_err(),
+            "{name} must reject omission of ready_for_review"
+        );
+    }
 }
 
 #[test]
@@ -287,8 +476,8 @@ fn semgrep_gate_validator_rejects_fail_open_mutants() {
         (
             "scan exits successfully before running",
             security.replace(
-                "        run: |\n          report=\"$RUNNER_TEMP/semgrep.json\"",
-                "        run: |\n          exit 0\n          report=\"$RUNNER_TEMP/semgrep.json\"",
+                "        run: |\n          rules=\".semgrep/rules\"",
+                "        run: |\n          exit 0\n          rules=\".semgrep/rules\"",
             ),
         ),
         (
@@ -317,8 +506,8 @@ fn semgrep_gate_validator_rejects_fail_open_mutants() {
         (
             "checker tests are not targeted",
             security.replace(
-                "python3 -m unittest tests/test_check_semgrep.py",
-                "python3 -m unittest",
+                "          tests/test_check_semgrep.py\n",
+                "",
             ),
         ),
         (
@@ -342,6 +531,37 @@ fn semgrep_gate_validator_rejects_fail_open_mutants() {
                 "      - name: Test Semgrep report checker\n        continue-on-error: true\n        shell: bash",
             ),
         ),
+        (
+            "pack helper tests are removed",
+            security.replace("          tests/test_semgrep_packs.py\n", ""),
+        ),
+        (
+            "pack manifest is bypassed",
+            security.replace(
+                "--manifest .semgrep/packs.lock.json",
+                "--manifest /tmp/unreviewed.json",
+            ),
+        ),
+        (
+            "pack verification is removed",
+            security.replace(
+                concat!(
+                    "          python3 scripts/semgrep_packs.py verify \\\n",
+                    "            --manifest .semgrep/packs.lock.json \\\n",
+                    "            --input-dir \"$rules\"\n",
+                ),
+                "",
+            ),
+        ),
+        (
+            "dynamic Registry packs replace pinned files",
+            security
+                .replace("--config \"$rules/default.yml\"", "--config p/default")
+                .replace(
+                    "--config \"$rules/security-audit.yml\"",
+                    "--config p/security-audit",
+                ),
+        ),
     ];
 
     for (name, mutant) in mutants {
@@ -351,6 +571,154 @@ fn semgrep_gate_validator_rejects_fail_open_mutants() {
             "{name} mutation must be rejected"
         );
     }
+}
+
+#[test]
+fn semgrep_rule_pack_updater_is_signed_draft_and_fail_closed() {
+    let updater =
+        fs::read_to_string(repository_root().join(".github/workflows/update-semgrep-rules.yml"))
+            .expect("read Semgrep updater workflow");
+
+    assert_semgrep_updater_is_protected(&updater);
+}
+
+#[test]
+fn semgrep_rule_pack_updater_validator_rejects_unsafe_mutants() {
+    let updater =
+        fs::read_to_string(repository_root().join(".github/workflows/update-semgrep-rules.yml"))
+            .expect("read Semgrep updater workflow");
+    let mutants = [
+        (
+            "update job continues on error",
+            updater.replacen(
+                "  update:\n",
+                "  update:\n    continue-on-error: true\n",
+                1,
+            ),
+        ),
+        (
+            "refresh step is conditional",
+            updater.replace(
+                "      - name: Refresh pinned rule-pack hashes\n        shell: bash",
+                "      - name: Refresh pinned rule-pack hashes\n        if: ${{ false }}\n        shell: bash",
+            ),
+        ),
+        (
+            "refresh failure is suppressed",
+            updater.replace(
+                "--input-dir \"$RUNNER_TEMP/semgrep-rules\"\n\n      - name: Validate",
+                "--input-dir \"$RUNNER_TEMP/semgrep-rules\" || true\n\n      - name: Validate",
+            ),
+        ),
+        (
+            "current packs are not downloaded",
+            updater.replace("https://semgrep.dev/c/p/default", "https://example.com/default"),
+        ),
+        (
+            "download failure is suppressed",
+            updater.replace("https://semgrep.dev/c/p/default", "https://semgrep.dev/c/p/default || true"),
+        ),
+        (
+            "refreshed packs are not verified",
+            updater.replace("python3 scripts/semgrep_packs.py verify", "echo verify"),
+        ),
+        (
+            "refreshed packs are not validated",
+            updater.replace("--validate \\", ""),
+        ),
+        (
+            "update PR can include arbitrary files",
+            updater.replace(
+                "add-paths: .semgrep/packs.lock.json",
+                "add-paths: .",
+            ),
+        ),
+        (
+            "update PR uses a mutable branch",
+            updater.replace(
+                "branch: automation/update-semgrep-rules",
+                "branch: main",
+            ),
+        ),
+        (
+            "update PR is not a draft",
+            updater.replace("draft: always-true", "draft: false"),
+        ),
+        (
+            "update commit is not signed",
+            updater.replace("sign-commits: true", "sign-commits: false"),
+        ),
+        (
+            "signed-commit verification is removed",
+            updater.replace(
+                "run: test \"$COMMITS_VERIFIED\" = \"true\"",
+                "run: echo \"$COMMITS_VERIFIED\"",
+            ),
+        ),
+        (
+            "closed pull requests spuriously require commit verification",
+            updater.replace(
+                concat!(
+                    "        if: >-\n",
+                    "          ${{\n",
+                    "            steps.pull-request.outputs.pull-request-operation == 'created' ||\n",
+                    "            steps.pull-request.outputs.pull-request-operation == 'updated'\n",
+                    "          }}\n",
+                ),
+                concat!(
+                    "        if: ${{ ",
+                    "steps.pull-request.outputs.pull-request-operation != 'none' }}\n",
+                ),
+            ),
+        ),
+    ];
+
+    for (name, mutant) in mutants {
+        assert_ne!(mutant, updater, "{name} mutation must change the workflow");
+        assert!(
+            std::panic::catch_unwind(|| assert_semgrep_updater_is_protected(&mutant)).is_err(),
+            "{name} mutation must be rejected"
+        );
+    }
+}
+
+#[test]
+fn semgrep_update_runbook_is_self_contained_and_explains_check_triggering() {
+    let documentation =
+        fs::read_to_string(repository_root().join("docs/SEMGREP.md")).expect("read Semgrep docs");
+    let local_update = documentation
+        .split_once("To prepare the same update locally:\n")
+        .map(|(_, section)| section)
+        .expect("Semgrep docs must include a local update runbook");
+
+    for required in [
+        "semgrep_update_dir=$(mktemp -d)",
+        "semgrep_update_rules=\"$semgrep_update_dir/rules\"",
+        concat!(
+            "trap 'rm -rf \"$semgrep_update_dir\" ",
+            "\"${semgrep_rules:-}\" \"${semgrep_work_dir:-}\"' EXIT",
+        ),
+        "--output \"$semgrep_update_rules/default.yml\"",
+        "--output \"$semgrep_update_rules/security-audit.yml\"",
+        "python3 scripts/semgrep_packs.py update",
+        "python3 scripts/semgrep_packs.py verify",
+        "semgrep scan \\",
+    ] {
+        assert!(
+            local_update.contains(required),
+            "local Semgrep update runbook is missing: {required}"
+        );
+    }
+    assert!(
+        documentation.contains(
+            "Pull requests created by `GITHUB_TOKEN` do not trigger other\nworkflow runs."
+        ),
+        "Semgrep docs must explain GITHUB_TOKEN workflow suppression"
+    );
+    assert!(
+        documentation.contains("`ready_for_review` event and starts the normal protected checks."),
+        "Semgrep docs must name the human-triggered check event"
+    );
 }
 
 #[test]
@@ -364,6 +732,7 @@ fn security_workflows_keep_all_expected_gates() {
         .expect("read CodeQL workflow");
 
     assert!(security.contains("semgrep==1.173.0"));
+    assert!(security.contains("scripts/semgrep_packs.py verify"));
     assert!(security.contains("--baseline .semgrep-baseline.json"));
     assert!(security.contains("gitleaks git --redact --verbose"));
     assert!(security.contains("version: v0.74.0"));

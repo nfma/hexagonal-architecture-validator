@@ -1,10 +1,20 @@
 # Semgrep gate runbook
 
-The `Semgrep and Gitleaks` required check runs Semgrep 1.173.0 with the
-`p/default` and `p/security-audit` community rule packs. The checker fails
-closed when the scan reports a finding, skips a rule, changes engine, reaches a
-fixpoint timeout, loses required path coverage, or emits an unreviewed parser
-warning.
+The `Semgrep and Gitleaks` required check runs Semgrep 1.173.0 with hash-pinned
+snapshots of the `p/default` and `p/security-audit` community rule packs. CI
+downloads each snapshot to temporary storage and verifies its URL, byte size,
+rule count, and canonical SHA-256 digest before Semgrep reads it. The canonical
+digest sorts complete rule blocks by rule ID, so harmless Registry ordering
+differences across CDN edges do not break the gate while any rule-content
+change still does. The checker fails closed when pack integrity changes, the
+scan reports a finding, skips a rule, changes engine, reaches a fixpoint
+timeout, loses required path coverage, or emits an unreviewed parser warning.
+
+The repository deliberately does not commit the rule bodies. The
+[Semgrep Rules License v1.0](https://semgrep.dev/legal/rules-license/) permits
+internal use but prohibits distributing the rules. `.semgrep/packs.lock.json`
+therefore records only source URLs, hashes, byte sizes, the tested Semgrep
+version, and license provenance.
 
 ## Coverage
 
@@ -27,10 +37,25 @@ From the repository root:
 ```sh
 semgrep_work_dir=$(mktemp -d)
 semgrep_report="$semgrep_work_dir/semgrep.json"
+semgrep_rules=.semgrep/rules
+trap 'rm -rf "$semgrep_rules" "$semgrep_work_dir"' EXIT
+
+mkdir -p "$semgrep_rules"
+curl --fail --silent --show-error --proto '=https' --tlsv1.2 \
+  --max-time 60 --max-filesize 8388608 \
+  --output "$semgrep_rules/default.yml" \
+  https://semgrep.dev/c/p/default
+curl --fail --silent --show-error --proto '=https' --tlsv1.2 \
+  --max-time 60 --max-filesize 8388608 \
+  --output "$semgrep_rules/security-audit.yml" \
+  https://semgrep.dev/c/p/security-audit
+python3 scripts/semgrep_packs.py verify \
+  --manifest .semgrep/packs.lock.json \
+  --input-dir "$semgrep_rules"
 
 uvx --no-build --from semgrep==1.173.0 semgrep scan \
-  --config p/default \
-  --config p/security-audit \
+  --config "$semgrep_rules/default.yml" \
+  --config "$semgrep_rules/security-audit.yml" \
   --error \
   --metrics=off \
   --exclude target \
@@ -44,9 +69,67 @@ python3 scripts/check_semgrep.py \
   --repository-root .
 ```
 
-The community rule packs are fetched from the Semgrep registry at scan time.
-Their rule identities can therefore change independently of this repository;
-any resulting gate change must be reviewed, not accepted automatically.
+The exit trap removes the report and gitignored rule cache. Do not copy the
+fetched rule bodies into the repository or another public location.
+
+## Update pinned rule packs
+
+`Update Semgrep rules` runs every Monday and can also be started manually. It:
+
+1. downloads the two allowlisted Registry packs;
+2. updates only their canonical hashes, byte sizes, and rule counts in
+   `.semgrep/packs.lock.json`;
+3. re-checks the downloaded bytes against the refreshed integrity locks;
+4. validates both packs with the pinned Semgrep version; and
+5. opens a signed draft pull request containing only the lock manifest.
+
+The draft does not auto-merge. Review its hash and size changes, the Semgrep
+scan result, parser-warning baseline, and all normal protected checks before
+marking it ready. Pull requests created by `GITHUB_TOKEN` do not trigger other
+workflow runs. A maintainer must mark the draft ready, which emits the
+`ready_for_review` event and starts the normal protected checks.
+
+The repository setting **Settings → Actions → General → Workflow permissions →
+Allow GitHub Actions to create and approve pull requests** must be enabled for
+the scheduled job to open its draft. The workflow still receives no default
+permissions; write access is limited to the updater job and the PR contains
+only the lock manifest.
+
+To prepare the same update locally:
+
+```sh
+semgrep_update_dir=$(mktemp -d)
+semgrep_update_rules="$semgrep_update_dir/rules"
+trap 'rm -rf "$semgrep_update_dir" "${semgrep_rules:-}" "${semgrep_work_dir:-}"' EXIT
+
+mkdir -p "$semgrep_update_rules"
+curl --fail --silent --show-error --proto '=https' --tlsv1.2 \
+  --max-time 60 --max-filesize 8388608 \
+  --output "$semgrep_update_rules/default.yml" \
+  https://semgrep.dev/c/p/default
+curl --fail --silent --show-error --proto '=https' --tlsv1.2 \
+  --max-time 60 --max-filesize 8388608 \
+  --output "$semgrep_update_rules/security-audit.yml" \
+  https://semgrep.dev/c/p/security-audit
+
+python3 scripts/semgrep_packs.py update \
+  --manifest .semgrep/packs.lock.json \
+  --input-dir "$semgrep_update_rules"
+
+python3 -m unittest tests/test_semgrep_packs.py
+python3 scripts/semgrep_packs.py verify \
+  --manifest .semgrep/packs.lock.json \
+  --input-dir "$semgrep_update_rules"
+
+uvx --no-build --from semgrep==1.173.0 semgrep scan \
+  --validate \
+  --metrics=off \
+  --config "$semgrep_update_rules/default.yml" \
+  --config "$semgrep_update_rules/security-audit.yml"
+```
+
+Then run the full gate above. Never edit a digest or byte size without fetching
+and validating the corresponding rule pack.
 
 ## Review and regenerate parser warnings
 
