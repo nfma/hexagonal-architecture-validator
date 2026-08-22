@@ -7,6 +7,7 @@ import tempfile
 import unittest
 from contextlib import redirect_stderr
 from pathlib import Path
+from unittest import mock
 
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
@@ -89,6 +90,18 @@ class SemgrepPackTests(unittest.TestCase):
             with self.assertRaisesRegex(PACKS.PackError, "integrity differs"):
                 PACKS.verify_packs(manifest(), inputs)
 
+    def test_rejects_size_and_rule_count_drift(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            inputs = Path(directory)
+            write_packs(inputs)
+
+            for field in ("bytes", "rules"):
+                changed = manifest()
+                changed["packs"][0][field] += 1
+                with self.subTest(field=field):
+                    with self.assertRaisesRegex(PACKS.PackError, "integrity differs"):
+                        PACKS.verify_packs(changed, inputs)
+
     def test_rule_order_does_not_change_the_canonical_digest(self) -> None:
         first = b"rules:\n- id: b\n  pattern: b()\n- id: a\n  pattern: a()\n"
         second = b"rules:\n- id: a\n  pattern: a()\n- id: b\n  pattern: b()\n"
@@ -156,6 +169,17 @@ class SemgrepPackTests(unittest.TestCase):
             )
             self.assertEqual(refreshed["packs"][0]["canonicalSha256"], digest)
             self.assertEqual(refreshed["packs"][0]["rules"], rules)
+
+    def test_atomic_write_removes_temporary_file_after_fsync_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            target = root / "packs.lock.json"
+
+            with mock.patch.object(PACKS.os, "fsync", side_effect=OSError("simulated")):
+                with self.assertRaisesRegex(PACKS.PackError, "could not write"):
+                    PACKS._atomic_write(target, b"{}\n")
+
+            self.assertEqual(list(root.iterdir()), [])
 
     def test_rejects_non_rules_documents_and_oversized_packs(self) -> None:
         for content in (b"not-rules: []\n", b"rules:\n" + b"x" * PACKS.MAX_PACK_BYTES):

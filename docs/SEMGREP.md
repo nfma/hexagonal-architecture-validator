@@ -79,14 +79,15 @@ fetched rule bodies into the repository or another public location.
 1. downloads the two allowlisted Registry packs;
 2. updates only their canonical hashes, byte sizes, and rule counts in
    `.semgrep/packs.lock.json`;
-3. fetches the packs again through the integrity verifier;
+3. re-checks the downloaded bytes against the refreshed integrity locks;
 4. validates both packs with the pinned Semgrep version; and
 5. opens a signed draft pull request containing only the lock manifest.
 
 The draft does not auto-merge. Review its hash and size changes, the Semgrep
 scan result, parser-warning baseline, and all normal protected checks before
-marking it ready. GitHub may require a maintainer to approve workflow runs for
-a pull request created by `GITHUB_TOKEN`.
+marking it ready. Pull requests created by `GITHUB_TOKEN` do not trigger other
+workflow runs. A maintainer must mark the draft ready, which emits the
+`ready_for_review` event and starts the normal protected checks.
 
 The repository setting **Settings → Actions → General → Workflow permissions →
 Allow GitHub Actions to create and approve pull requests** must be enabled for
@@ -97,6 +98,20 @@ only the lock manifest.
 To prepare the same update locally:
 
 ```sh
+semgrep_update_dir=$(mktemp -d)
+semgrep_rules="$semgrep_update_dir/rules"
+trap 'rm -rf "$semgrep_update_dir"' EXIT
+
+mkdir -p "$semgrep_rules"
+curl --fail --silent --show-error --proto '=https' --tlsv1.2 \
+  --max-time 60 --max-filesize 8388608 \
+  --output "$semgrep_rules/default.yml" \
+  https://semgrep.dev/c/p/default
+curl --fail --silent --show-error --proto '=https' --tlsv1.2 \
+  --max-time 60 --max-filesize 8388608 \
+  --output "$semgrep_rules/security-audit.yml" \
+  https://semgrep.dev/c/p/security-audit
+
 python3 scripts/semgrep_packs.py update \
   --manifest .semgrep/packs.lock.json \
   --input-dir "$semgrep_rules"

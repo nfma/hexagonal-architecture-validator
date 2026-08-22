@@ -175,10 +175,10 @@ def _atomic_write(path: Path, content: bytes) -> None:
     temporary_path: Path | None = None
     try:
         with tempfile.NamedTemporaryFile(dir=path.parent, delete=False) as temporary:
+            temporary_path = Path(temporary.name)
             temporary.write(content)
             temporary.flush()
             os.fsync(temporary.fileno())
-            temporary_path = Path(temporary.name)
         os.replace(temporary_path, path)
     except OSError as error:
         if temporary_path is not None:

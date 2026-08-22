@@ -95,7 +95,11 @@ jobs:
             Review the lock changes, Semgrep results, and parser-warning baseline before marking this PR ready.
 
       - name: Verify signed update commit
-        if: ${{ steps.pull-request.outputs.pull-request-operation != 'none' }}
+        if: >-
+          ${{
+            steps.pull-request.outputs.pull-request-operation == 'created' ||
+            steps.pull-request.outputs.pull-request-operation == 'updated'
+          }}
         env:
           COMMITS_VERIFIED: ${{ steps.pull-request.outputs.pull-request-commits-verified }}
         run: test "$COMMITS_VERIFIED" = "true"

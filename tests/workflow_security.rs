@@ -131,6 +131,30 @@ fn assert_unconditional(label: &str, yaml: &str, indentation: &str) {
     }
 }
 
+fn assert_pull_request_rechecks_ready_drafts(name: &str, workflow: &str) {
+    let marker = "  pull_request:\n";
+    let tail = workflow
+        .split_once(marker)
+        .map(|(_, tail)| tail)
+        .unwrap_or_else(|| panic!("{name} must run for pull requests"));
+    let mut end = tail.len();
+    let mut offset = 0;
+    for line in tail.split_inclusive('\n') {
+        if line.starts_with("  ") && !line.starts_with("   ") {
+            end = offset;
+            break;
+        }
+        offset += line.len();
+    }
+    let pull_request = &tail[..end];
+    assert!(
+        pull_request
+            .lines()
+            .any(|line| line == "    types: [opened, reopened, synchronize, ready_for_review]"),
+        "{name} must rerun when a draft update pull request is marked ready"
+    );
+}
+
 fn assert_semgrep_gate_is_fail_closed(workflow: &str) {
     let job = named_job(workflow, "semgrep-and-secrets");
     assert_unconditional("Semgrep job", job, "    ");
@@ -298,10 +322,14 @@ fn assert_semgrep_updater_is_protected(workflow: &str) {
 
     let verify = named_step(workflow, "Verify signed update commit");
     assert!(
-        verify.contains(
-            "        if: ${{ steps.pull-request.outputs.pull-request-operation != 'none' }}\n"
-        ),
-        "Semgrep updater must verify every created update commit"
+        verify.contains(concat!(
+            "        if: >-\n",
+            "          ${{\n",
+            "            steps.pull-request.outputs.pull-request-operation == 'created' ||\n",
+            "            steps.pull-request.outputs.pull-request-operation == 'updated'\n",
+            "          }}\n",
+        )),
+        "Semgrep updater must verify created or updated commits only"
     );
     assert!(
         !verify.contains("continue-on-error:"),
@@ -327,6 +355,33 @@ fn every_external_action_is_pinned_to_a_full_commit_sha() {
         .sum::<usize>();
 
     assert!(checked > 0, "no external action references were checked");
+}
+
+#[test]
+fn protected_pull_request_workflows_recheck_ready_drafts() {
+    for name in [
+        "ci.yml",
+        "codeql.yml",
+        "dependency-audit.yml",
+        "repository-quality.yml",
+        "security.yml",
+        "sonar.yml",
+    ] {
+        let workflow = fs::read_to_string(repository_root().join(".github/workflows").join(name))
+            .unwrap_or_else(|error| panic!("read {name}: {error}"));
+        assert_pull_request_rechecks_ready_drafts(name, &workflow);
+
+        let mutant = workflow.replace(
+            "    types: [opened, reopened, synchronize, ready_for_review]",
+            "    types: [opened, reopened, synchronize]",
+        );
+        assert_ne!(mutant, workflow, "{name} mutation must change the workflow");
+        assert!(
+            std::panic::catch_unwind(|| assert_pull_request_rechecks_ready_drafts(name, &mutant))
+                .is_err(),
+            "{name} must reject omission of ready_for_review"
+        );
+    }
 }
 
 #[test]
@@ -600,6 +655,22 @@ fn semgrep_rule_pack_updater_validator_rejects_unsafe_mutants() {
                 "run: echo \"$COMMITS_VERIFIED\"",
             ),
         ),
+        (
+            "closed pull requests spuriously require commit verification",
+            updater.replace(
+                concat!(
+                    "        if: >-\n",
+                    "          ${{\n",
+                    "            steps.pull-request.outputs.pull-request-operation == 'created' ||\n",
+                    "            steps.pull-request.outputs.pull-request-operation == 'updated'\n",
+                    "          }}\n",
+                ),
+                concat!(
+                    "        if: ${{ ",
+                    "steps.pull-request.outputs.pull-request-operation != 'none' }}\n",
+                ),
+            ),
+        ),
     ];
 
     for (name, mutant) in mutants {
@@ -609,6 +680,41 @@ fn semgrep_rule_pack_updater_validator_rejects_unsafe_mutants() {
             "{name} mutation must be rejected"
         );
     }
+}
+
+#[test]
+fn semgrep_update_runbook_is_self_contained_and_explains_check_triggering() {
+    let documentation =
+        fs::read_to_string(repository_root().join("docs/SEMGREP.md")).expect("read Semgrep docs");
+    let local_update = documentation
+        .split_once("To prepare the same update locally:\n")
+        .map(|(_, section)| section)
+        .expect("Semgrep docs must include a local update runbook");
+
+    for required in [
+        "semgrep_update_dir=$(mktemp -d)",
+        "semgrep_rules=\"$semgrep_update_dir/rules\"",
+        "--output \"$semgrep_rules/default.yml\"",
+        "--output \"$semgrep_rules/security-audit.yml\"",
+        "python3 scripts/semgrep_packs.py update",
+        "python3 scripts/semgrep_packs.py verify",
+        "semgrep scan \\",
+    ] {
+        assert!(
+            local_update.contains(required),
+            "local Semgrep update runbook is missing: {required}"
+        );
+    }
+    assert!(
+        documentation.contains(
+            "Pull requests created by `GITHUB_TOKEN` do not trigger other\nworkflow runs."
+        ),
+        "Semgrep docs must explain GITHUB_TOKEN workflow suppression"
+    );
+    assert!(
+        documentation.contains("`ready_for_review` event and starts the normal protected checks."),
+        "Semgrep docs must name the human-triggered check event"
+    );
 }
 
 #[test]
