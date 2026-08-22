@@ -101,39 +101,88 @@ fn named_step<'a>(workflow: &'a str, name: &str) -> &'a str {
     &tail[..end]
 }
 
+fn named_job<'a>(workflow: &'a str, name: &str) -> &'a str {
+    let marker = format!("  {name}:\n");
+    let start = workflow
+        .find(&marker)
+        .unwrap_or_else(|| panic!("missing workflow job: {name}"));
+    let tail = &workflow[start..];
+    let mut end = tail.len();
+    let mut offset = marker.len();
+    for line in tail[marker.len()..].split_inclusive('\n') {
+        if line.starts_with("  ") && !line.starts_with("   ") {
+            end = offset;
+            break;
+        }
+        offset += line.len();
+    }
+    &tail[..end]
+}
+
+fn assert_unconditional(label: &str, yaml: &str, indentation: &str) {
+    for key in ["continue-on-error:", "if:"] {
+        assert!(
+            !yaml
+                .lines()
+                .any(|line| line.starts_with(indentation)
+                    && line[indentation.len()..].starts_with(key)),
+            "{label} must not declare {key}"
+        );
+    }
+}
+
 fn assert_semgrep_gate_is_fail_closed(workflow: &str) {
+    let job = named_job(workflow, "semgrep-and-secrets");
+    assert_unconditional("Semgrep job", job, "    ");
+
     let tests = named_step(workflow, "Test Semgrep report checker");
+    assert_unconditional("Semgrep checker-test step", tests, "        ");
     assert!(
-        tests.contains("python3 -m unittest tests/test_check_semgrep.py"),
+        tests.lines().any(|line| line == "        shell: bash"),
+        "Semgrep checker tests must use the fail-fast Bash shell"
+    );
+    assert!(
+        tests
+            .lines()
+            .any(|line| line == "        run: python3 -m unittest tests/test_check_semgrep.py"),
         "Semgrep checker regressions are not executed"
     );
 
     let scan = named_step(workflow, "Run Semgrep community security rules");
-    for required in [
-        "semgrep==1.173.0 semgrep scan \\",
-        "--config p/default \\",
-        "--config p/security-audit \\",
-        "--error \\",
-        "--metrics=off \\",
-        "--exclude target \\",
-        "--json \\",
-        "--output \"$report\" \\",
-        "python3 scripts/check_semgrep.py",
-        "--report \"$report\"",
-        "--baseline .semgrep-baseline.json",
-        "--repository-root .",
-    ] {
-        assert!(
-            scan.contains(required),
-            "Semgrep gate is missing {required}"
-        );
-    }
-    for fail_open in ["continue-on-error:", "|| true", "set +e", "set +o errexit"] {
-        assert!(
-            !scan.contains(fail_open),
-            "Semgrep gate contains fail-open wiring: {fail_open}"
-        );
-    }
+    assert_unconditional("Semgrep scan step", scan, "        ");
+    assert!(
+        scan.lines().any(|line| line == "        shell: bash"),
+        "Semgrep scan must use the fail-fast Bash shell"
+    );
+    let run = scan
+        .split_once("        run: |\n")
+        .map(|(_, run)| run)
+        .expect("Semgrep scan must use a shell run block");
+    let commands = run
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        commands,
+        [
+            "report=\"$RUNNER_TEMP/semgrep.json\"",
+            "uvx --no-build --from semgrep==1.173.0 semgrep scan \\",
+            "--config p/default \\",
+            "--config p/security-audit \\",
+            "--error \\",
+            "--metrics=off \\",
+            "--exclude target \\",
+            "--json \\",
+            "--output \"$report\" \\",
+            ".",
+            "python3 scripts/check_semgrep.py \\",
+            "--report \"$report\" \\",
+            "--baseline .semgrep-baseline.json \\",
+            "--repository-root .",
+        ],
+        "Semgrep scan commands must match the reviewed fail-closed sequence"
+    );
 }
 
 #[test]
@@ -212,21 +261,95 @@ fn semgrep_gate_validator_rejects_fail_open_mutants() {
     let security = fs::read_to_string(repository_root().join(".github/workflows/security.yml"))
         .expect("read security workflow");
     let mutants = [
-        security.replace("--error \\\n", ""),
-        security.replace("semgrep scan \\\n", "semgrep scan\n"),
-        security.replace(
-            "      - name: Run Semgrep community security rules\n        run: |",
-            "      - name: Run Semgrep community security rules\n        continue-on-error: true\n        run: |",
+        (
+            "job continues on error",
+            security.replacen(
+                "  semgrep-and-secrets:\n",
+                "  semgrep-and-secrets:\n    continue-on-error: true\n",
+                1,
+            ),
         ),
-        security.replace("--repository-root .", "--repository-root . || true"),
-        security.replace(
-            "python3 -m unittest tests/test_check_semgrep.py",
-            "python3 -m unittest",
+        (
+            "job skips pull requests",
+            security.replacen(
+                "  semgrep-and-secrets:\n",
+                "  semgrep-and-secrets:\n    if: github.event_name != 'pull_request'\n",
+                1,
+            ),
+        ),
+        (
+            "scan step is conditional",
+            security.replace(
+                "      - name: Run Semgrep community security rules\n        shell: bash",
+                "      - name: Run Semgrep community security rules\n        if: ${{ false }}\n        shell: bash",
+            ),
+        ),
+        (
+            "scan exits successfully before running",
+            security.replace(
+                "        run: |\n          report=\"$RUNNER_TEMP/semgrep.json\"",
+                "        run: |\n          exit 0\n          report=\"$RUNNER_TEMP/semgrep.json\"",
+            ),
+        ),
+        (
+            "checker failure is suppressed with colon",
+            security.replace("--repository-root .", "--repository-root . || :"),
+        ),
+        (
+            "Semgrep error mode removed",
+            security.replace("--error \\\n", ""),
+        ),
+        (
+            "Semgrep shell continuation removed",
+            security.replace("semgrep scan \\\n", "semgrep scan\n"),
+        ),
+        (
+            "scan step continues on error",
+            security.replace(
+                "      - name: Run Semgrep community security rules\n        shell: bash",
+                "      - name: Run Semgrep community security rules\n        continue-on-error: true\n        shell: bash",
+            ),
+        ),
+        (
+            "checker failure is suppressed with true",
+            security.replace("--repository-root .", "--repository-root . || true"),
+        ),
+        (
+            "checker tests are not targeted",
+            security.replace(
+                "python3 -m unittest tests/test_check_semgrep.py",
+                "python3 -m unittest",
+            ),
+        ),
+        (
+            "baseline path is replaced",
+            security.replace(
+                "--baseline .semgrep-baseline.json",
+                "--baseline .semgrep-baseline.json.disabled",
+            ),
+        ),
+        (
+            "Semgrep command is commented out",
+            security.replace(
+                "          uvx --no-build --from semgrep==1.173.0 semgrep scan \\",
+                "          # uvx --no-build --from semgrep==1.173.0 semgrep scan \\",
+            ),
+        ),
+        (
+            "checker tests continue on error",
+            security.replace(
+                "      - name: Test Semgrep report checker\n        shell: bash",
+                "      - name: Test Semgrep report checker\n        continue-on-error: true\n        shell: bash",
+            ),
         ),
     ];
 
-    for mutant in mutants {
-        assert!(std::panic::catch_unwind(|| assert_semgrep_gate_is_fail_closed(&mutant)).is_err());
+    for (name, mutant) in mutants {
+        assert_ne!(mutant, security, "{name} mutation must change the workflow");
+        assert!(
+            std::panic::catch_unwind(|| assert_semgrep_gate_is_fail_closed(&mutant)).is_err(),
+            "{name} mutation must be rejected"
+        );
     }
 }
 

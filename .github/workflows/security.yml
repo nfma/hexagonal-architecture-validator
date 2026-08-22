@@ -44,9 +44,11 @@ jobs:
           echo "$RUNNER_TEMP/ci-tools" >> "$GITHUB_PATH"
 
       - name: Test Semgrep report checker
+        shell: bash
         run: python3 -m unittest tests/test_check_semgrep.py
 
       - name: Run Semgrep community security rules
+        shell: bash
         run: |
           report="$RUNNER_TEMP/semgrep.json"
           uvx --no-build --from semgrep==1.173.0 semgrep scan \

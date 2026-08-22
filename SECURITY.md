@@ -15,3 +15,10 @@ impact, and any suggested mitigation.
 The validator analyzes untrusted source as data and must not execute project
 build scripts, macros, or binaries. A report that shows analysis causing code
 execution, network writes, or repository mutation is security-sensitive.
+
+## CI security gates
+
+The Semgrep gate rejects findings, scan degradation, unreviewed parser
+warnings, and required-path coverage loss. See the
+[Semgrep gate runbook](docs/SEMGREP.md) for its scope and baseline review
+procedure.
