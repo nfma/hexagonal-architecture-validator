@@ -56,9 +56,7 @@ def _exact_fields(value: dict[str, Any], expected: set[str], label: str) -> None
         )
 
 
-def validate_manifest(value: object) -> dict[str, object]:
-    manifest = _mapping(value, "Semgrep pack manifest")
-    _exact_fields(manifest, MANIFEST_FIELDS, "Semgrep pack manifest")
+def _validate_manifest_header(manifest: dict[str, Any]) -> None:
     if type(manifest.get("schemaVersion")) is not int or manifest["schemaVersion"] != 1:
         raise PackError("Semgrep pack manifest.schemaVersion must be 1")
     version = manifest.get("semgrepVersion")
@@ -69,48 +67,63 @@ def validate_manifest(value: object) -> dict[str, object]:
     if manifest.get("license") != LICENSE or manifest.get("licenseUrl") != LICENSE_URL:
         raise PackError("Semgrep pack manifest license metadata differs")
 
-    packs = manifest.get("packs")
-    if not isinstance(packs, list):
+
+def _normalize_pack(value: object, index: int) -> tuple[str, dict[str, object]]:
+    label = f"Semgrep pack manifest.packs[{index}]"
+    pack = _mapping(value, label)
+    _exact_fields(pack, PACK_FIELDS, label)
+    pack_id = pack.get("id")
+    if not isinstance(pack_id, str) or pack_id not in PACK_SPECS:
+        raise PackError(f"unexpected Semgrep pack id: {pack_id!r}")
+    spec = PACK_SPECS[pack_id]
+    if pack.get("url") != spec["url"] or pack.get("file") != spec["file"]:
+        raise PackError(f"Semgrep pack source differs for {pack_id}")
+    digest = pack.get("canonicalSha256")
+    if (
+        not isinstance(digest, str)
+        or len(digest) != 64
+        or any(character not in "0123456789abcdef" for character in digest)
+    ):
+        raise PackError(f"Semgrep pack canonicalSha256 is invalid for {pack_id}")
+    size = pack.get("bytes")
+    if type(size) is not int or size < 1 or size > MAX_PACK_BYTES:
+        raise PackError(f"Semgrep pack byte size is invalid for {pack_id}")
+    rules = pack.get("rules")
+    if type(rules) is not int or rules < 1:
+        raise PackError(f"Semgrep pack rule count is invalid for {pack_id}")
+    return pack_id, {
+        "id": pack_id,
+        "url": spec["url"],
+        "file": spec["file"],
+        "canonicalSha256": digest,
+        "bytes": size,
+        "rules": rules,
+    }
+
+
+def _normalize_packs(value: object) -> dict[str, dict[str, object]]:
+    if not isinstance(value, list):
         raise PackError("Semgrep pack manifest.packs must be a list")
     normalized: dict[str, dict[str, object]] = {}
-    for index, value in enumerate(packs):
-        pack = _mapping(value, f"Semgrep pack manifest.packs[{index}]")
-        _exact_fields(pack, PACK_FIELDS, f"Semgrep pack manifest.packs[{index}]")
-        pack_id = pack.get("id")
-        if not isinstance(pack_id, str) or pack_id not in PACK_SPECS:
-            raise PackError(f"unexpected Semgrep pack id: {pack_id!r}")
+    for index, item in enumerate(value):
+        pack_id, pack = _normalize_pack(item, index)
         if pack_id in normalized:
             raise PackError(f"duplicate Semgrep pack id: {pack_id}")
-        spec = PACK_SPECS[pack_id]
-        if pack.get("url") != spec["url"] or pack.get("file") != spec["file"]:
-            raise PackError(f"Semgrep pack source differs for {pack_id}")
-        digest = pack.get("canonicalSha256")
-        if (
-            not isinstance(digest, str)
-            or len(digest) != 64
-            or any(character not in "0123456789abcdef" for character in digest)
-        ):
-            raise PackError(f"Semgrep pack canonicalSha256 is invalid for {pack_id}")
-        size = pack.get("bytes")
-        if type(size) is not int or size < 1 or size > MAX_PACK_BYTES:
-            raise PackError(f"Semgrep pack byte size is invalid for {pack_id}")
-        rules = pack.get("rules")
-        if type(rules) is not int or rules < 1:
-            raise PackError(f"Semgrep pack rule count is invalid for {pack_id}")
-        normalized[pack_id] = {
-            "id": pack_id,
-            "url": spec["url"],
-            "file": spec["file"],
-            "canonicalSha256": digest,
-            "bytes": size,
-            "rules": rules,
-        }
-
+        normalized[pack_id] = pack
     if set(normalized) != set(PACK_SPECS):
         raise PackError(
             f"Semgrep pack set differs: expected={sorted(PACK_SPECS)}, "
             f"actual={sorted(normalized)}"
         )
+    return normalized
+
+
+def validate_manifest(value: object) -> dict[str, object]:
+    manifest = _mapping(value, "Semgrep pack manifest")
+    _exact_fields(manifest, MANIFEST_FIELDS, "Semgrep pack manifest")
+    _validate_manifest_header(manifest)
+    packs = manifest.get("packs")
+    normalized = _normalize_packs(packs)
     return {
         "schemaVersion": 1,
         "semgrepVersion": SEMGREP_VERSION,
@@ -120,12 +133,7 @@ def validate_manifest(value: object) -> dict[str, object]:
     }
 
 
-def _validate_pack_content(pack_id: str, content: bytes) -> tuple[str, int, int]:
-    if not content.startswith(b"rules:\n"):
-        raise PackError(f"Semgrep pack {pack_id} is not a rules YAML document")
-    if len(content) > MAX_PACK_BYTES:
-        raise PackError(f"Semgrep pack {pack_id} exceeds {MAX_PACK_BYTES} bytes")
-
+def _parse_rule_blocks(pack_id: str, content: bytes) -> list[tuple[bytes, bytes]]:
     blocks: list[tuple[bytes, bytes]] = []
     current_id: bytes | None = None
     current_lines: list[bytes] = []
@@ -148,7 +156,16 @@ def _validate_pack_content(pack_id: str, content: bytes) -> tuple[str, int, int]
         blocks.append((current_id, b"".join(current_lines)))
     if not blocks:
         raise PackError(f"Semgrep pack {pack_id} does not contain rules")
+    return blocks
 
+
+def _validate_pack_content(pack_id: str, content: bytes) -> tuple[str, int, int]:
+    if not content.startswith(b"rules:\n"):
+        raise PackError(f"Semgrep pack {pack_id} is not a rules YAML document")
+    if len(content) > MAX_PACK_BYTES:
+        raise PackError(f"Semgrep pack {pack_id} exceeds {MAX_PACK_BYTES} bytes")
+
+    blocks = _parse_rule_blocks(pack_id, content)
     rule_ids = [rule_id for rule_id, _ in blocks]
     if len(set(rule_ids)) != len(rule_ids):
         raise PackError(f"Semgrep pack {pack_id} contains duplicate rule ids")
@@ -252,6 +269,13 @@ def _write_json(path: Path, value: object) -> None:
     _atomic_write(path, f"{json.dumps(value, indent=2)}\n".encode())
 
 
+def _manifest_path(argument: Path) -> Path:
+    expected = Path(".semgrep/packs.lock.json")
+    if argument != expected:
+        raise PackError(f"--manifest must be {expected.as_posix()}")
+    return expected
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Verify hash-pinned Semgrep rule packs")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -264,7 +288,8 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     try:
-        manifest = _load_json(args.manifest)
+        manifest_path = _manifest_path(args.manifest)
+        manifest = _load_json(manifest_path)
         if args.command == "verify":
             verified = verify_packs(manifest, args.input_dir)
             print(f"Verified {len(verified)} Semgrep rule packs")
@@ -273,7 +298,7 @@ def main(argv: list[str] | None = None) -> int:
             if refreshed == validate_manifest(manifest):
                 print("Semgrep rule pack hashes are current")
             else:
-                _write_json(args.manifest, refreshed)
+                _write_json(manifest_path, refreshed)
                 print("Updated Semgrep rule pack hashes")
     except PackError as error:
         print(f"Semgrep pack operation failed: {error}", file=sys.stderr)
