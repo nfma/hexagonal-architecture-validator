@@ -4,10 +4,9 @@ import importlib.util
 import io
 import json
 import tempfile
-import unittest
 from contextlib import redirect_stderr
 from pathlib import Path
-from unittest import mock
+from unittest import TestCase, main, mock
 
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
@@ -55,7 +54,7 @@ def write_packs(directory: Path, contents: dict[str, bytes] | None = None) -> No
         (directory / spec["file"]).write_bytes(selected[spec["url"]])
 
 
-class SemgrepPackTests(unittest.TestCase):
+class SemgrepPackTests(TestCase):
     def test_committed_manifest_matches_the_closed_schema(self) -> None:
         committed = json.loads(
             (REPOSITORY_ROOT / ".semgrep" / "packs.lock.json").read_text(
@@ -135,7 +134,6 @@ class SemgrepPackTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             inputs = Path(directory)
             write_packs(inputs)
-            default = inputs / "default.yml"
             replacement = inputs / "replacement.yml"
             replacement.write_bytes(b"rules:\n- id: replacement\n")
             original_open = PACKS.os.open
@@ -271,4 +269,4 @@ class SemgrepPackTests(unittest.TestCase):
 
 
 if __name__ == "__main__":
-    unittest.main()
+    main()
