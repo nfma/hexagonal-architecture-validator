@@ -1706,7 +1706,59 @@ fn relative_path(base: &Path, target: &Path) -> PathBuf {
 
 #[cfg(test)]
 mod tests {
+    use proptest::prelude::*;
+
     use super::*;
+
+    #[test]
+    fn fuzz_use_tree_flattening_preserves_generated_segments() {
+        let strategy = prop::collection::vec("[a-z][a-z0-9_]{0,12}", 1..6);
+        let mut runner = proptest::test_runner::TestRunner::default();
+        runner
+            .run(&strategy, |segments| {
+                let identifiers = segments
+                    .iter()
+                    .map(|segment| format!("fuzz_{segment}"))
+                    .collect::<Vec<_>>();
+                let source = format!("use {};", identifiers.join("::"));
+                let item: ItemUse = syn::parse_str(&source).expect("generated use path is valid");
+                let imports = flatten_item_use(&item).expect("generated use tree is supported");
+                prop_assert_eq!(imports.len(), 1);
+                prop_assert_eq!(&imports[0].segments, &identifiers);
+                Ok(())
+            })
+            .expect("generated use paths should flatten without losing segments");
+    }
+
+    #[test]
+    fn fuzz_path_normalization_removes_internal_parent_segments() {
+        let strategy = (
+            prop::collection::vec("[a-z][a-z0-9_-]{0,12}", 1..6),
+            prop::collection::vec("[a-z][a-z0-9_-]{0,12}", 1..6),
+        );
+        let mut runner = proptest::test_runner::TestRunner::default();
+        runner
+            .run(&strategy, |(prefix, suffix)| {
+                let mut path = PathBuf::new();
+                for component in &prefix {
+                    path.push(component);
+                }
+                path.push("discarded");
+                path.push("..");
+                for component in &suffix {
+                    path.push(component);
+                }
+
+                let normalized = normalize_path(&path);
+                prop_assert!(
+                    !normalized
+                        .split('/')
+                        .any(|component| component == "." || component == "..")
+                );
+                Ok(())
+            })
+            .expect("normalization should remove generated parent segments");
+    }
 
     #[test]
     fn flattens_grouped_use_trees() {

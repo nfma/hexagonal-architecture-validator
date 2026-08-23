@@ -119,8 +119,12 @@ impl LoadedConfig {
     pub fn load(path: &Path) -> anyhow::Result<Self> {
         let contents = fs::read_to_string(path)
             .with_context(|| format!("could not read {}", path.display()))?;
-        let file: ConfigFile = toml::from_str(&contents)
-            .with_context(|| format!("invalid TOML in {}", path.display()))?;
+        Self::parse(&contents)
+            .with_context(|| format!("invalid configuration in {}", path.display()))
+    }
+
+    fn parse(contents: &str) -> anyhow::Result<Self> {
+        let file: ConfigFile = toml::from_str(contents).context("invalid TOML")?;
 
         if file.version != SUPPORTED_CONFIG_VERSION {
             bail!(
@@ -401,7 +405,20 @@ pub fn classify_modules(
 
 #[cfg(test)]
 mod tests {
+    use proptest::prelude::*;
+
     use super::*;
+
+    #[test]
+    fn fuzz_config_compilation_is_panic_free() {
+        let mut runner = proptest::test_runner::TestRunner::default();
+        runner
+            .run(&any::<String>(), |contents| {
+                let _ = LoadedConfig::parse(&contents);
+                Ok(())
+            })
+            .expect("configuration parsing should remain panic-free");
+    }
 
     #[test]
     fn rejects_unknown_config_fields() {
