@@ -317,9 +317,8 @@ fn compile_patterns(kind: &str, role: &str, patterns: Vec<String>) -> anyhow::Re
     patterns
         .into_iter()
         .map(|pattern| {
-            Regex::new(&pattern).with_context(|| {
-                format!("invalid {} pattern '{}' in role '{}'", kind, pattern, role)
-            })
+            let context = format!("invalid {} pattern '{}' in role '{}'", kind, pattern, role);
+            Regex::new(&pattern).context(context)
         })
         .collect()
 }
