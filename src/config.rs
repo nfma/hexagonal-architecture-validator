@@ -317,8 +317,9 @@ fn compile_patterns(kind: &str, role: &str, patterns: Vec<String>) -> anyhow::Re
     patterns
         .into_iter()
         .map(|pattern| {
-            Regex::new(&pattern)
-                .with_context(|| format!("invalid {kind} pattern '{pattern}' in role '{role}'"))
+            Regex::new(&pattern).with_context(|| {
+                format!("invalid {} pattern '{}' in role '{}'", kind, pattern, role)
+            })
         })
         .collect()
 }
@@ -425,5 +426,17 @@ mod tests {
         let error = toml::from_str::<ConfigFile>("version = 1\nunknown = true\n")
             .expect_err("unknown fields should fail");
         assert!(error.to_string().contains("unknown field"));
+    }
+
+    #[test]
+    fn invalid_pattern_identifies_kind_and_role() {
+        let error = compile_patterns("module", "core", vec!["(".to_owned()])
+            .expect_err("invalid regular expressions should fail");
+
+        assert!(
+            error
+                .to_string()
+                .contains("invalid module pattern '(' in role 'core'")
+        );
     }
 }
