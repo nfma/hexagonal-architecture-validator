@@ -314,13 +314,12 @@ fn validate_id(
 }
 
 fn compile_patterns(kind: &str, role: &str, patterns: Vec<String>) -> anyhow::Result<Vec<Regex>> {
-    patterns
-        .into_iter()
-        .map(|pattern| {
-            let context = format!("invalid {} pattern '{}' in role '{}'", kind, pattern, role);
-            Regex::new(&pattern).context(context)
-        })
-        .collect()
+    let mut compiled = Vec::with_capacity(patterns.len());
+    for pattern in patterns {
+        let context = format!("invalid {} pattern '{}' in role '{}'", kind, pattern, role);
+        compiled.push(Regex::new(&pattern).context(context)?);
+    }
+    Ok(compiled)
 }
 
 fn require_hexagonal_roles(role_ids: &BTreeSet<String>) -> anyhow::Result<()> {
